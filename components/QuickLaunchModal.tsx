@@ -3,441 +3,361 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import {
-  Search,
-  Sparkles,
-  CalendarClock,
-  LayoutGrid,
-  Smile,
-  CircleDot,
-  ArrowUpRight,
-  Cpu,
-  FolderPlus,
-  X,
-} from 'lucide-react';
+import React, { useEffect, useRef, useMemo } from 'react';
+import { Command, X, Cpu, ArrowUpRight, FolderOpen } from 'lucide-react';
 import {
   MindCategory,
   MindFileNode,
   FormationMode,
+  MCPToolName,
+  MCPCommandPayload,
 } from '../types';
 
 interface QuickLaunchModalProps {
   isOpen: boolean;
   onClose: () => void;
-  files: MindFileNode[];
+  query: string;
+  onQueryChange: (val: string) => void;
+  selectedIndex: number;
+  onSelectIndex: (idx: number) => void;
+  agentLabel: string;
   categories: MindCategory[];
-  connectedAgentLabel: string;
+  files: MindFileNode[];
   onSelectFile: (fileId: string) => void;
-  onSelectCategory: (categoryId: string) => void;
-  onRunToolFormation: (formation: FormationMode) => void;
-  onBreakApartAll: () => void;
-  onMarkAllCaughtUp: () => void;
+  onSendMessage: (query: string) => void;
+  onDispatchMCP: (tool: MCPToolName, params: MCPCommandPayload['params']) => void;
   onOpenConnectors: () => void;
-  onRunAgentPrompt: (prompt: string) => void;
-}
-
-interface QuickActionItem {
-  id: string;
-  type: 'tool' | 'file' | 'group' | 'agent-prompt';
-  title: string;
-  subtitle: string;
-  badgeText: string;
-  badgeColor: string;
-  onExecute: () => void;
 }
 
 export const QuickLaunchModal: React.FC<QuickLaunchModalProps> = ({
   isOpen,
   onClose,
-  files,
+  query,
+  onQueryChange,
+  selectedIndex,
+  onSelectIndex,
+  agentLabel,
   categories,
-  connectedAgentLabel,
+  files,
   onSelectFile,
-  onSelectCategory,
-  onRunToolFormation,
-  onBreakApartAll,
-  onMarkAllCaughtUp,
+  onSendMessage,
+  onDispatchMCP,
   onOpenConnectors,
-  onRunAgentPrompt,
 }) => {
-  const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen) {
-      setQuery('');
-      setActiveIndex(0);
-      setTimeout(() => {
-        inputRef.current?.focus();
-      }, 20);
+      setTimeout(() => inputRef.current?.focus(), 20);
     }
   }, [isOpen]);
 
-  const items = useMemo<QuickActionItem[]>(() => {
-    const q = query.trim().toLowerCase();
-
-    const toolActions: QuickActionItem[] = [
+  const mcpTools = useMemo(
+    () => [
       {
-        id: 'tool-daily-flow',
-        type: 'tool',
-        title: 'Run Tool: sort_daily_workload()',
-        subtitle: 'Arrange balls into Priority Front Row, On Deck, and Caught Up',
-        badgeText: 'W',
-        badgeColor: '#2563EB',
-        onExecute: () => {
-          onRunToolFormation('daily-flow');
+        id: 'mcp-sort-daily',
+        label: 'sort_spheres({ formation: "daily-flow" })',
+        subtitle: 'MCP Tool Call · Arrange 3D spheres into Daily Priority Runway',
+        badge: 'MCP TOOL',
+        run: () => {
           onClose();
+          onDispatchMCP('sort_spheres', { formation: 'daily-flow' });
         },
       },
       {
-        id: 'tool-break-apart',
-        type: 'tool',
-        title: 'Run Tool: break_apart_all_clusters()',
-        subtitle: 'Where are all my files? Break all spheres into individual app balls',
-        badgeText: 'B',
-        badgeColor: '#F97316',
-        onExecute: () => {
-          onBreakApartAll();
+        id: 'mcp-sort-smile',
+        label: 'sort_spheres({ formation: "caught-up-smile" })',
+        subtitle: 'MCP Tool Call · Arrange all spheres into Caught-Up 3D Smile',
+        badge: 'MCP TOOL',
+        run: () => {
           onClose();
+          onDispatchMCP('sort_spheres', { formation: 'caught-up-smile' });
         },
       },
       {
-        id: 'tool-app-grid',
-        type: 'tool',
-        title: 'Run Tool: align_app_columns()',
-        subtitle: 'Line up all 3D balls into neat columns by App Emblem (G, D, P, N, W)',
-        badgeText: 'A',
-        badgeColor: '#0F172A',
-        onExecute: () => {
-          onRunToolFormation('app-grid');
+        id: 'mcp-sort-grid',
+        label: 'sort_spheres({ formation: "app-grid" })',
+        subtitle: 'MCP Tool Call · Snap spheres into App Columns by emblem',
+        badge: 'MCP TOOL',
+        run: () => {
           onClose();
+          onDispatchMCP('sort_spheres', { formation: 'app-grid' });
         },
       },
       {
-        id: 'tool-kaleidoscope',
-        type: 'tool',
-        title: 'Run Tool: form_kaleidoscope_mandala()',
-        subtitle: 'Symmetrical color-balanced mandala formation',
-        badgeText: 'K',
-        badgeColor: '#4F46E5',
-        onExecute: () => {
-          onRunToolFormation('kaleidoscope');
+        id: 'mcp-sort-kaleidoscope',
+        label: 'sort_spheres({ formation: "kaleidoscope" })',
+        subtitle: 'MCP Tool Call · Symmetrical color-coordinated mandala',
+        badge: 'MCP TOOL',
+        run: () => {
           onClose();
+          onDispatchMCP('sort_spheres', { formation: 'kaleidoscope' });
         },
       },
       {
-        id: 'tool-smile',
-        type: 'tool',
-        title: 'Run Tool: form_caught_up_smile()',
-        subtitle: 'Mark everything Caught Up and arrange balls into a 3D Smile!',
-        badgeText: '✓',
-        badgeColor: '#10B981',
-        onExecute: () => {
-          onMarkAllCaughtUp();
+        id: 'mcp-query-work',
+        label: 'query_cluster({ clusterId: "work" })',
+        subtitle: 'MCP Tool Call · Expand and focus the Work 3D cluster',
+        badge: 'MCP TOOL',
+        run: () => {
           onClose();
+          onDispatchMCP('query_cluster', { clusterId: 'work', explosionLevel: 0.95 });
         },
       },
       {
-        id: 'tool-connectors',
-        type: 'tool',
-        title: 'Connect Folder, Discord, WhatsApp, or Cloud Storage...',
-        subtitle: 'Link real folders & messaging archives into color-coded 3D groups',
-        badgeText: '+',
-        badgeColor: '#8B5CF6',
-        onExecute: () => {
+        id: 'open-connectors',
+        label: 'Open Data Connectors & Directory Ingestion',
+        subtitle: 'Import Local Directory (File System Access API) or configure Gmail OAuth 2.0',
+        badge: 'INGEST',
+        run: () => {
           onClose();
           onOpenConnectors();
         },
       },
-    ];
+    ],
+    [onClose, onDispatchMCP, onOpenConnectors]
+  );
 
-    const matchingTools = q
-      ? toolActions.filter(
-          (t) =>
-            t.title.toLowerCase().includes(q) ||
-            t.subtitle.toLowerCase().includes(q)
-        )
-      : toolActions;
+  const matchingTools = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return mcpTools;
+    return mcpTools.filter(
+      (t) =>
+        t.label.toLowerCase().includes(q) ||
+        t.subtitle.toLowerCase().includes(q)
+    );
+  }, [query, mcpTools]);
 
-    const matchingFiles: QuickActionItem[] = files
-      .filter((f) => {
-        if (!q) return true;
-        return (
+  const matchingFiles = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return files.slice(0, 8);
+    return files
+      .filter(
+        (f) =>
           f.title.toLowerCase().includes(q) ||
           f.appName.toLowerCase().includes(q) ||
           f.locationPath.toLowerCase().includes(q) ||
           f.summary.toLowerCase().includes(q) ||
-          f.content.toLowerCase().includes(q)
-        );
-      })
-      .slice(0, q ? 12 : 6)
-      .map((f) => {
-        const cat = categories.find((c) => c.id === f.categoryId);
-        return {
-          id: `file-${f.id}`,
-          type: 'file',
-          title: f.title,
-          subtitle: `${cat?.name || 'Group'} · Located in: ${f.locationPath}`,
-          badgeText: f.appSymbol,
-          badgeColor: cat?.color || '#2563EB',
-          onExecute: () => {
-            onSelectFile(f.id);
-            onClose();
-          },
-        };
-      });
-
-    const matchingGroups: QuickActionItem[] = q
-      ? categories
-          .filter(
-            (c) =>
-              c.name.toLowerCase().includes(q) ||
-              c.description.toLowerCase().includes(q)
-          )
-          .map((c) => ({
-            id: `group-${c.id}`,
-            type: 'group',
-            title: `Focus Group Sphere: ${c.name}`,
-            subtitle: c.description,
-            badgeText: c.symbol || c.name.charAt(0),
-            badgeColor: c.color,
-            onExecute: () => {
-              onSelectCategory(c.id);
-              onClose();
-            },
-          }))
-      : [];
-
-    const combined: QuickActionItem[] = [];
-
-    if (q.length > 1) {
-      combined.push({
-        id: 'ask-agent-live',
-        type: 'agent-prompt',
-        title: `Ask ${connectedAgentLabel} Location Engine: "${query.trim()}"`,
-        subtitle: 'Physically sort 3D balls and locate matching items without opening dock',
-        badgeText: 'AI',
-        badgeColor: '#2563EB',
-        onExecute: () => {
-          onRunAgentPrompt(query.trim());
-          onClose();
-        },
-      });
-    }
-
-    // When user is typing a search query, prioritize matching files first, then tools
-    if (q) {
-      return [...combined, ...matchingFiles, ...matchingGroups, ...matchingTools];
-    }
-
-    return [...matchingTools, ...matchingFiles];
-  }, [
-    query,
-    files,
-    categories,
-    connectedAgentLabel,
-    onRunToolFormation,
-    onBreakApartAll,
-    onMarkAllCaughtUp,
-    onOpenConnectors,
-    onSelectFile,
-    onSelectCategory,
-    onRunAgentPrompt,
-    onClose,
-  ]);
-
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [query]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setActiveIndex((prev) => (items.length > 0 ? (prev + 1) % items.length : 0));
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setActiveIndex((prev) =>
-          items.length > 0 ? (prev - 1 + items.length) % items.length : 0
-        );
-      } else if (e.key === 'Enter' && items[activeIndex]) {
-        e.preventDefault();
-        items[activeIndex].onExecute();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, items, activeIndex, onClose]);
+          (f.metadata?.relativePath || '').toLowerCase().includes(q) ||
+          (f.metadata?.mimeType || '').toLowerCase().includes(q)
+      )
+      .slice(0, 10);
+  }, [query, files]);
 
   if (!isOpen) return null;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-900/35 backdrop-blur-sm pointer-events-auto"
+      className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-start justify-center pt-20 px-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl bg-white/95 backdrop-blur-2xl border border-slate-200/90 rounded-2xl shadow-2xl overflow-hidden text-slate-900"
+        className="w-full max-w-2xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Search & Command Input Header */}
-        <div className="flex items-center gap-3 px-4 py-3.5 border-b border-slate-200/80">
-          <Search size={18} className="text-blue-600 shrink-0" />
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (query.trim()) {
+              const q = query.trim();
+              onClose();
+              onSendMessage(q);
+            } else if (matchingTools[0]) {
+              matchingTools[0].run();
+            }
+          }}
+          className="flex items-center gap-3 px-4 py-3.5 bg-slate-50 border-b border-slate-200"
+        >
+          <Command size={18} className="text-blue-600 shrink-0" />
           <input
             ref={inputRef}
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search all files, locations, apps (Gmail, Discord, WhatsApp, Folders) or trigger a 3D tool..."
-            className="flex-1 bg-transparent text-sm font-medium text-slate-900 placeholder-slate-400 focus:outline-none"
+            onChange={(e) => {
+              onQueryChange(e.target.value);
+              onSelectIndex(0);
+            }}
+            placeholder="Search across all 3D nodes, paths, MIME types, or trigger MCP tool calls..."
+            className="flex-1 text-sm text-slate-900 placeholder-slate-400 bg-transparent focus:outline-none"
           />
-          <span className="px-2 py-0.5 text-[11px] font-mono font-semibold text-slate-500 bg-slate-100 rounded border border-slate-200">
-            ESC
-          </span>
+          {query.trim() && (
+            <button
+              type="submit"
+              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+            >
+              Ask {agentLabel} ↵
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
-            className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
+            className="p-1 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-200/60"
           >
             <X size={16} />
           </button>
-        </div>
+        </form>
 
-        {/* Instant 1-Click Tool Strip */}
-        <div className="px-4 py-2 bg-slate-50/90 border-b border-slate-200/60 flex items-center gap-1.5 overflow-x-auto">
-          <span className="text-[11px] font-semibold text-slate-400 mr-1 whitespace-nowrap">
-            Instant 3D Tools:
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              onRunToolFormation('daily-flow');
-              onClose();
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 text-slate-700 hover:text-blue-700 border border-slate-200 text-[11px] font-semibold whitespace-nowrap transition-colors"
-          >
-            <CalendarClock size={12} />
-            <span>Daily Workload</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onRunToolFormation('app-grid');
-              onClose();
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white hover:bg-blue-50 text-slate-700 hover:text-blue-700 border border-slate-200 text-[11px] font-semibold whitespace-nowrap transition-colors"
-          >
-            <LayoutGrid size={12} />
-            <span>App Columns</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onRunToolFormation('kaleidoscope');
-              onClose();
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 border border-slate-200 text-[11px] font-semibold whitespace-nowrap transition-colors"
-          >
-            <Sparkles size={12} />
-            <span>Kaleidoscope</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onMarkAllCaughtUp();
-              onClose();
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-[11px] font-semibold whitespace-nowrap transition-colors"
-          >
-            <Smile size={12} />
-            <span>Caught-Up Smile</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onClose();
-              onOpenConnectors();
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-50 hover:bg-violet-100 text-violet-700 border border-violet-200 text-[11px] font-semibold whitespace-nowrap transition-colors"
-          >
-            <FolderPlus size={12} />
-            <span>Connect Source</span>
-          </button>
-        </div>
-
-        {/* Results List */}
-        <div className="max-h-[54vh] overflow-y-auto p-2 divide-y divide-slate-100">
-          {items.length === 0 ? (
-            <div className="py-10 text-center text-xs text-slate-500">
-              No matching files or tools found. Press Enter to ask {connectedAgentLabel} Location Engine.
-            </div>
-          ) : (
-            items.map((item, idx) => {
-              const isSelected = idx === activeIndex;
-              return (
+        <div className="max-h-[64vh] overflow-y-auto p-3.5 space-y-4">
+          {query.trim() && (
+            <div>
+              <div className="px-2 pb-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Dispatch Semantic Query or MCP Cluster Filter
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <button
-                  key={item.id}
                   type="button"
-                  onMouseEnter={() => setActiveIndex(idx)}
-                  onClick={item.onExecute}
-                  className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl text-left transition-colors ${
-                    isSelected ? 'bg-blue-50/90 text-slate-900' : 'hover:bg-slate-50 text-slate-800'
-                  }`}
+                  onClick={() => {
+                    const q = query.trim();
+                    onClose();
+                    onSendMessage(q);
+                  }}
+                  className="p-3 rounded-xl bg-blue-50 hover:bg-blue-100/80 border border-blue-200 flex items-center justify-between gap-2 text-left transition-colors"
                 >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span
-                      className="w-8 h-8 rounded-xl text-white font-display font-extrabold text-xs flex items-center justify-center shrink-0 shadow-xs"
-                      style={{ backgroundColor: item.badgeColor }}
-                    >
-                      {item.badgeText}
-                    </span>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Cpu size={15} className="text-blue-600 shrink-0" />
                     <div className="min-w-0">
                       <div className="text-xs font-bold text-slate-900 truncate">
-                        {item.title}
+                        Ask {agentLabel}: &ldquo;{query.trim()}&rdquo;
                       </div>
-                      <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                        {item.subtitle}
+                      <div className="text-[10px] text-slate-600">
+                        Resolves location &amp; pulls matching 3D spheres forward
                       </div>
                     </div>
                   </div>
-
-                  <div className="flex items-center gap-2 shrink-0 text-[11px] font-semibold text-slate-400">
-                    <span>
-                      {item.type === 'tool'
-                        ? 'Run Tool'
-                        : item.type === 'agent-prompt'
-                        ? 'Ask Engine'
-                        : item.type === 'group'
-                        ? 'Focus Sphere'
-                        : 'Locate Ball'}
-                    </span>
-                    <ArrowUpRight size={14} className={isSelected ? 'text-blue-600' : 'text-slate-400'} />
-                  </div>
+                  <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-blue-600 text-white rounded shrink-0">
+                    ↵
+                  </span>
                 </button>
-              );
-            })
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const q = query.trim();
+                    onClose();
+                    onDispatchMCP('query_cluster', { query: q, explosionLevel: 0.95 });
+                  }}
+                  className="p-3 rounded-xl bg-slate-100 hover:bg-slate-200/80 border border-slate-200 flex items-center justify-between gap-2 text-left transition-colors"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <FolderOpen size={15} className="text-slate-700 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-slate-900 truncate font-mono">
+                        query_cluster(&ldquo;{query.trim()}&rdquo;)
+                      </div>
+                      <div className="text-[10px] text-slate-600">
+                        Direct MCP coordinate mutation to stage matching nodes
+                      </div>
+                    </div>
+                  </div>
+                  <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-slate-800 text-white rounded shrink-0">
+                    MCP
+                  </span>
+                </button>
+              </div>
+            </div>
           )}
+
+          {matchingTools.length > 0 && (
+            <div>
+              <div className="px-2 pb-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                MCP &amp; 3D Engine Tool Calls (No Dock Required)
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                {matchingTools.map((tool, idx) => (
+                  <button
+                    key={tool.id}
+                    type="button"
+                    onClick={tool.run}
+                    className={`p-2.5 rounded-xl border text-left transition-colors flex items-start justify-between gap-2 ${
+                      selectedIndex === idx && !query
+                        ? 'bg-slate-100 border-slate-300'
+                        : 'bg-slate-50/80 hover:bg-slate-100 border-slate-200/80'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold font-mono text-slate-900 truncate">
+                        {tool.label}
+                      </div>
+                      <div className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">
+                        {tool.subtitle}
+                      </div>
+                    </div>
+                    <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold bg-white text-slate-600 border border-slate-200 rounded shrink-0">
+                      {tool.badge}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <div className="px-2 pb-1.5 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              <span>
+                {query.trim()
+                  ? `Matching 3D Nodes (${matchingFiles.length})`
+                  : 'Indexed 3D File Nodes'}
+              </span>
+              <span>Click to run highlight_node()</span>
+            </div>
+
+            {matchingFiles.length === 0 ? (
+              <div className="p-4 text-center text-xs text-slate-500 bg-slate-50 rounded-xl">
+                No indexed node matched &ldquo;{query}&rdquo; — press Enter to run semantic agent search.
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden bg-white">
+                {matchingFiles.map((file) => {
+                  const cat = categories.find((c) => c.id === file.categoryId);
+                  return (
+                    <button
+                      key={file.id}
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onDispatchMCP('highlight_node', { nodeId: file.id });
+                        onSelectFile(file.id);
+                      }}
+                      className="w-full px-3.5 py-2.5 hover:bg-blue-50/60 flex items-center justify-between gap-3 text-left transition-colors"
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span
+                          className="w-8 h-8 rounded-full text-white font-display font-extrabold text-xs flex items-center justify-center shrink-0 shadow-xs"
+                          style={{ backgroundColor: cat?.color || '#2563EB' }}
+                        >
+                          {file.appSymbol}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-slate-900 truncate">
+                            {file.title}
+                          </div>
+                          <div className="text-[11px] text-slate-500 truncate">
+                            {cat?.name} · {file.metadata?.relativePath || file.locationPath}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-[10px] font-mono text-slate-400">
+                          {file.sizeLabel}
+                        </span>
+                        <ArrowUpRight size={14} className="text-slate-400" />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Footer Hints */}
-        <div className="px-4 py-2 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between text-[11px] text-slate-500">
-          <div className="flex items-center gap-3">
-            <span>↑↓ Navigate</span>
-            <span>·</span>
-            <span>↵ Execute or Locate in 3D</span>
-            <span>·</span>
-            <span>⌘K Toggle Anywhere</span>
-          </div>
-          <div className="flex items-center gap-1.5 font-medium text-slate-600">
-            <Cpu size={12} className="text-blue-600" />
-            <span>Engine: {connectedAgentLabel}</span>
-          </div>
+        <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
+          <span>
+            Shortcut: <kbd className="font-mono font-semibold">⌘K</kbd> /{' '}
+            <kbd className="font-mono font-semibold">Ctrl+K</kbd>
+          </span>
+          <span>
+            Press <kbd className="font-mono font-semibold">Esc</kbd> to close
+          </span>
         </div>
       </div>
     </div>

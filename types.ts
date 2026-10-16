@@ -6,11 +6,11 @@
 export type MaterialFinish = 'glass' | 'pearl' | 'metal' | 'matte';
 
 export type FormationMode =
-  | 'clusters'        // Grouped by Work, Personal, Skills, Storage, and Connected Sources
+  | 'clusters'        // Grouped by Work, Personal, Skills, Storage, and Connected Directories
   | 'daily-flow'      // Sorted along a Today's Workload Priority Arc
   | 'app-grid'        // Organized into clean columns by App Emblem
   | 'kaleidoscope'    // Balanced symmetrical color mandala when organized
-  | 'caught-up-smile'; // Peaceful 3D Smile formation when everything is caught up!
+  | 'caught-up-smile'; // Peaceful 3D Smile formation when everything is caught up
 
 export type ConnectedAgentId = 'gemini' | 'claude' | 'mcp-bridge';
 
@@ -25,18 +25,27 @@ export interface MindCategory {
   orbitAngle: number;
   elevation: number;
   isConnectorGroup?: boolean;
-  connectorType?: 'local-folder' | 'discord' | 'whatsapp' | 'email-archive' | 'cloud-mount';
+  connectorType?: 'local-folder' | 'gmail' | 'discord' | 'whatsapp' | 'email-archive' | 'cloud-mount';
 }
 
 export type FileKind = 'email' | 'document' | 'photo' | 'sheet' | 'note' | 'video' | 'folder' | 'chat';
+
+export interface RealFileMetadata {
+  name: string;
+  relativePath: string;
+  mimeType: string;
+  sizeBytes: number;
+  lastModified: number;
+  lastModifiedISO: string;
+}
 
 export interface MindFileNode {
   id: string;
   title: string;
   categoryId: string;
-  appSymbol: string;    // 'D' for Discord, 'W' for WhatsApp, 'F' for Folder, etc.
-  appName: string;      // 'Discord', 'WhatsApp', 'Local Folder', 'Notes', 'Calendar'
-  locationPath: string; // Descriptive human location
+  appSymbol: string;
+  appName: string;
+  locationPath: string;
   storageDrive: string;
   fileKind: FileKind;
   sizeLabel: string;
@@ -45,12 +54,14 @@ export interface MindFileNode {
   content: string;
   importance: number;
   workloadPriority: 'urgent' | 'today' | 'caught-up';
+  metadata?: RealFileMetadata;
+  coordinateOverride?: [number, number, number];
 }
 
 export interface StorageConnectorConfig {
   id: string;
   name: string;
-  provider: 'local-folder' | 'discord' | 'whatsapp' | 'email-vault' | 'cloud-folder';
+  provider: 'local-folder' | 'gmail' | 'discord' | 'whatsapp' | 'email-vault';
   symbol: string;
   color: string;
   finish: MaterialFinish;
@@ -59,6 +70,30 @@ export interface StorageConnectorConfig {
   accountOrPathLabel: string;
   itemCount: number;
   lastSynced: string;
+}
+
+export interface GmailOAuthConfig {
+  clientId: string;
+  accessToken: string;
+  scope: string;
+  userEmail?: string;
+}
+
+export type MCPToolName = 'sort_spheres' | 'highlight_node' | 'query_cluster';
+
+export interface MCPCommandPayload {
+  id?: string;
+  tool: MCPToolName;
+  params: {
+    formation?: FormationMode;
+    nodeId?: string;
+    clusterId?: string;
+    query?: string;
+    coordinates?: Record<string, [number, number, number]>;
+    explosionLevel?: number;
+  };
+  agentName?: string;
+  timestamp?: string;
 }
 
 export type SpatialActionType =

@@ -3,12 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Search,
   Send,
-  ChevronDown,
-  ChevronUp,
   FolderOpen,
   Plus,
   X,
@@ -23,16 +21,14 @@ import {
   LayoutGrid,
   CalendarClock,
   CircleDot,
-  Command,
   HardDrive,
-  MessageSquare,
-  Mail,
-  Upload,
-  CheckCircle2,
-  RefreshCw,
+  Radio,
 } from 'lucide-react';
 import { SpatialMindMap } from './components/SpatialMindMap';
+import { ConnectorsModal } from './components/ConnectorsModal';
+import { QuickLaunchModal } from './components/QuickLaunchModal';
 import { PWAInstallModalTrigger, OfflineIndicator } from './components/PWAInstallButton';
+import { useAgentBridge } from './hooks/useAgentBridge';
 import { INITIAL_CATEGORIES, INITIAL_FILES } from './data/initialData';
 import {
   MindCategory,
@@ -43,6 +39,8 @@ import {
   ConnectedAgentId,
   AgentToolTrace,
   StorageConnectorConfig,
+  MCPCommandPayload,
+  MCPToolName,
   ChatMessage,
 } from './types';
 
@@ -60,9 +58,9 @@ const PRESET_COLORS = [
 
 const EVERYDAY_APPS: { symbol: string; name: string; defaultLocation: string; kind: FileKind }[] = [
   { symbol: 'F', name: 'Local Folder', defaultLocation: 'Computer Folder · Documents', kind: 'folder' },
+  { symbol: 'G', name: 'Gmail', defaultLocation: 'Gmail · Starred Inbox', kind: 'email' },
   { symbol: 'D', name: 'Discord', defaultLocation: 'Discord · Saved Channels & Pins', kind: 'chat' },
   { symbol: 'W', name: 'WhatsApp', defaultLocation: 'WhatsApp · Starred Messages', kind: 'chat' },
-  { symbol: 'M', name: 'Workspace Mail', defaultLocation: 'Workspace Mail · Starred Archive', kind: 'email' },
   { symbol: 'P', name: 'Photos', defaultLocation: 'Apple Photos · Favorites Album', kind: 'photo' },
   { symbol: 'N', name: 'Notes', defaultLocation: 'Apple Notes · Pinned Lists', kind: 'note' },
   { symbol: 'C', name: 'Calendar', defaultLocation: 'Calendar · Upcoming Events', kind: 'note' },
@@ -86,7 +84,7 @@ const FORMATIONS: {
   {
     id: 'clusters',
     label: 'Color Spheres',
-    desc: 'Grouped into Work, Personal, Skills, Storage, and Connected Folders',
+    desc: 'Grouped into Work, Personal, Skills, Storage, and Imported Directories',
   },
   {
     id: 'daily-flow',
@@ -96,7 +94,7 @@ const FORMATIONS: {
   {
     id: 'app-grid',
     label: 'App Columns',
-    desc: 'Lined up by App emblem (F Folder, D Discord, W WhatsApp, N Notes)',
+    desc: 'Lined up by App emblem (F Folder, G Gmail, D Discord, W WhatsApp)',
   },
   {
     id: 'kaleidoscope',
@@ -113,100 +111,74 @@ const FORMATIONS: {
 const INITIAL_CONNECTORS: StorageConnectorConfig[] = [
   {
     id: 'conn-local-folder',
-    name: 'Local Computer Folder',
+    name: 'Local Directory',
     provider: 'local-folder',
     symbol: 'F',
     color: '#06B6D4',
     finish: 'pearl',
     categoryId: 'conn-group-local',
     connected: false,
-    accountOrPathLabel: 'Mount any folder from your computer into 3D balls',
+    accountOrPathLabel: 'Native File System Access API (showDirectoryPicker)',
+    itemCount: 0,
+    lastSynced: 'Not connected',
+  },
+  {
+    id: 'conn-gmail',
+    name: 'Gmail Readonly API',
+    provider: 'gmail',
+    symbol: 'G',
+    color: '#EA4335',
+    finish: 'glass',
+    categoryId: 'conn-group-gmail',
+    connected: false,
+    accountOrPathLabel: 'OAuth 2.0 https://www.googleapis.com/auth/gmail.readonly',
     itemCount: 0,
     lastSynced: 'Not connected',
   },
   {
     id: 'conn-discord',
-    name: 'Discord Channels & Pins',
+    name: 'Discord Archive',
     provider: 'discord',
     symbol: 'D',
     color: '#5865F2',
     finish: 'glass',
     categoryId: 'conn-group-discord',
     connected: false,
-    accountOrPathLabel: 'Connect Discord OAuth or import channel messages/pins',
+    accountOrPathLabel: 'Import real Discord channel JSON/TXT messages',
     itemCount: 0,
     lastSynced: 'Not connected',
   },
   {
     id: 'conn-whatsapp',
-    name: 'WhatsApp Chats & Media',
+    name: 'WhatsApp Export',
     provider: 'whatsapp',
     symbol: 'W',
     color: '#10B981',
     finish: 'pearl',
     categoryId: 'conn-group-whatsapp',
     connected: false,
-    accountOrPathLabel: 'Import WhatsApp chat export (.txt) or shared docs folder',
+    accountOrPathLabel: 'Import real WhatsApp exported .txt chat files',
     itemCount: 0,
     lastSynced: 'Not connected',
   },
   {
     id: 'conn-email-vault',
-    name: 'Workspace Email Archive',
+    name: 'Email Archive (.eml / .mbox)',
     provider: 'email-vault',
     symbol: 'M',
     color: '#EC4899',
     finish: 'metal',
     categoryId: 'conn-group-email',
     connected: false,
-    accountOrPathLabel: 'Connect local .eml / .mbox files or mail archive folder',
-    itemCount: 0,
-    lastSynced: 'Not connected',
-  },
-  {
-    id: 'conn-cloud-folder',
-    name: 'Synced Cloud Drive Folder',
-    provider: 'cloud-folder',
-    symbol: 'C',
-    color: '#EAB308',
-    finish: 'glass',
-    categoryId: 'conn-group-cloud',
-    connected: false,
-    accountOrPathLabel: 'Mount synced iCloud Drive, Dropbox, or OneDrive folder',
+    accountOrPathLabel: 'Import local .eml or .mbox email files',
     itemCount: 0,
     lastSynced: 'Not connected',
   },
 ];
 
-function inferFileKind(filename: string): FileKind {
-  const lower = filename.toLowerCase();
-  if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.webp') || lower.endsWith('.gif')) {
-    return 'photo';
-  }
-  if (lower.endsWith('.mp4') || lower.endsWith('.mov') || lower.endsWith('.webm')) {
-    return 'video';
-  }
-  if (lower.endsWith('.csv') || lower.endsWith('.xlsx') || lower.endsWith('.numbers')) {
-    return 'sheet';
-  }
-  if (lower.endsWith('.eml') || lower.endsWith('.mbox') || lower.endsWith('.msg')) {
-    return 'email';
-  }
-  if (lower.endsWith('.md') || lower.endsWith('.txt')) {
-    return 'note';
-  }
-  return 'document';
-}
-
-function formatByteSize(bytes: number): string {
-  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export const App: React.FC = () => {
   const [categories, setCategories] = useState<MindCategory[]>(() => {
-    const saved = localStorage.getItem('reactive_mind_categories_v4');
+    const saved = localStorage.getItem('reactive_mind_categories_v5');
     if (saved) {
       try {
         return JSON.parse(saved);
@@ -218,7 +190,7 @@ export const App: React.FC = () => {
   });
 
   const [files, setFiles] = useState<MindFileNode[]>(() => {
-    const saved = localStorage.getItem('reactive_mind_files_v4');
+    const saved = localStorage.getItem('reactive_mind_files_v5');
     if (saved) {
       try {
         return JSON.parse(saved);
@@ -230,7 +202,7 @@ export const App: React.FC = () => {
   });
 
   const [connectors, setConnectors] = useState<StorageConnectorConfig[]>(() => {
-    const saved = localStorage.getItem('reactive_mind_connectors_v4');
+    const saved = localStorage.getItem('reactive_mind_connectors_v5');
     if (saved) {
       try {
         return JSON.parse(saved);
@@ -240,6 +212,16 @@ export const App: React.FC = () => {
     }
     return INITIAL_CONNECTORS;
   });
+
+  // 1. UI Refactor: Dockable Drawer Collapse State (isDockCollapsed defaults to false)
+  const [isDockCollapsed, setIsDockCollapsed] = useState<boolean>(false);
+  const [dockTab, setDockTab] = useState<'engine' | 'formations' | 'colors'>('engine');
+
+  // Modals at z-50
+  const [isConnectorsOpen, setIsConnectorsOpen] = useState<boolean>(false);
+  const [isQuickLaunchOpen, setIsQuickLaunchOpen] = useState<boolean>(false);
+  const [quickLaunchQuery, setQuickLaunchQuery] = useState<string>('');
+  const [quickLaunchIndex, setQuickLaunchIndex] = useState<number>(0);
 
   // 3D Location Engine State
   const [formation, setFormation] = useState<FormationMode>('clusters');
@@ -251,28 +233,20 @@ export const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [cameraPreset, setCameraPreset] = useState<'overview' | 'top' | 'focus'>('overview');
 
-  // Global Cmd+K Quick-Launch Overlay State
-  const [cmdKOpen, setCmdKOpen] = useState<boolean>(false);
-  const [cmdKQuery, setCmdKQuery] = useState<string>('');
-  const [cmdKSelectedIndex, setCmdKSelectedIndex] = useState<number>(0);
-  const cmdKInputRef = useRef<HTMLInputElement>(null);
+  // Mutable 3D Coordinate Overrides Ref (kept out of high-frequency React render loops)
+  const coordinateOverridesRef = useRef<Record<string, [number, number, number]>>({});
 
-  // Folder / File Picker Refs for Real Connectors
-  const folderInputRef = useRef<HTMLInputElement>(null);
-  const fileImportInputRef = useRef<HTMLInputElement>(null);
-  const [pendingConnectorId, setPendingConnectorId] = useState<string | null>(null);
-  const [connectorStatusBanner, setConnectorStatusBanner] = useState<string | null>(null);
-
-  // Agent Tool-Call & Sorting Animation State
+  // Agent & MCP Bridge State
   const [connectedAgent, setConnectedAgent] = useState<ConnectedAgentId>('gemini');
+  const [externalWsUrl, setExternalWsUrl] = useState<string>('');
   const [isSorting, setIsSorting] = useState<boolean>(false);
   const [activeToolName, setActiveToolName] = useState<string | null>(null);
   const [toolTraces, setToolTraces] = useState<AgentToolTrace[]>([
     {
       id: 'trace-init',
-      agentName: 'Gemini',
+      agentName: 'MCP Bridge',
       toolName: 'init_location_engine',
-      querySummary: 'Indexed color-coordinated app balls across all active groups',
+      querySummary: 'Connected SSE MCP stream and indexed 3D spatial nodes',
       scannedCount: 17,
       matchedCount: 17,
       timestamp: 'Ready',
@@ -280,10 +254,8 @@ export const App: React.FC = () => {
   ]);
 
   const [activeSheet, setActiveSheet] = useState<
-    'none' | 'inspector' | 'all-files' | 'categories' | 'new-file' | 'agent-bridge' | 'connectors'
+    'none' | 'inspector' | 'all-files' | 'categories' | 'new-file' | 'agent-bridge'
   >('none');
-  const [dockCollapsed, setDockCollapsed] = useState<boolean>(false);
-  const [dockTab, setDockTab] = useState<'engine' | 'formations' | 'colors'>('engine');
 
   const [chatInput, setChatInput] = useState<string>('');
   const [isLoadingChat, setIsLoadingChat] = useState<boolean>(false);
@@ -293,8 +265,8 @@ export const App: React.FC = () => {
       id: 'welcome-msg',
       role: 'assistant',
       agentName: 'Gemini → Location Engine',
-      toolCalled: 'ready_for_tool_calls',
-      text: 'Descriptive Location Engine connected. Press Cmd+K (or Ctrl+K) anytime to quick-search all balls and trigger 3D tool calls without the dock, or open Connectors to link your Local Folders, Discord, WhatsApp, or Email Archives into custom color-coded 3D spheres!',
+      toolCalled: 'mcp_stream_connected',
+      text: 'Descriptive Location Engine ready. Press Cmd+K (or Ctrl+K) to search all nodes or dispatch MCP tool calls (sort_spheres, highlight_node, query_cluster), or open Connectors to ingest a real local directory via File System Access API.',
       timestamp: 'Just now',
       suggestedFollowUps: [
         'Sort my Daily Workload flow for today',
@@ -311,7 +283,7 @@ export const App: React.FC = () => {
   const [editSummary, setEditSummary] = useState<string>('');
   const [editPath, setEditPath] = useState<string>('');
 
-  // New Everyday Item Form State
+  // New Item Form State
   const [newFileTitle, setNewFileTitle] = useState<string>('');
   const [newFileCategoryId, setNewFileCategoryId] = useState<string>('work');
   const [selectedAppIndex, setSelectedAppIndex] = useState<number>(0);
@@ -319,7 +291,7 @@ export const App: React.FC = () => {
   const [newFileSummary, setNewFileSummary] = useState<string>('');
   const [newFileContent, setNewFileContent] = useState<string>('');
 
-  // New Category Group Form State
+  // New Category Form State
   const [newCategoryName, setNewCategoryName] = useState<string>('');
   const [newCategoryColor, setNewCategoryColor] = useState<string>('#EC4899');
   const [newCategoryFinish, setNewCategoryFinish] = useState<MaterialFinish>('pearl');
@@ -327,15 +299,15 @@ export const App: React.FC = () => {
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    localStorage.setItem('reactive_mind_categories_v4', JSON.stringify(categories));
+    localStorage.setItem('reactive_mind_categories_v5', JSON.stringify(categories));
   }, [categories]);
 
   useEffect(() => {
-    localStorage.setItem('reactive_mind_files_v4', JSON.stringify(files));
+    localStorage.setItem('reactive_mind_files_v5', JSON.stringify(files));
   }, [files]);
 
   useEffect(() => {
-    localStorage.setItem('reactive_mind_connectors_v4', JSON.stringify(connectors));
+    localStorage.setItem('reactive_mind_connectors_v5', JSON.stringify(connectors));
   }, [connectors]);
 
   useEffect(() => {
@@ -344,27 +316,156 @@ export const App: React.FC = () => {
     }
   }, [messages, isLoadingChat]);
 
-  // Listen for 3P OAuth popup success (e.g. Discord OAuth)
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && event.data?.provider === 'discord') {
-        finalizeDiscordConnection('Discord OAuth · Connected Server & Saved Channels');
+  const agentLabel =
+    connectedAgent === 'gemini'
+      ? 'Gemini'
+      : connectedAgent === 'claude'
+      ? 'Claude'
+      : 'MCP Tool Bridge';
+
+  // Handle incoming structured MCP Tool Calls (sort_spheres, highlight_node, query_cluster)
+  // Mutates 3D coordinates via coordinateOverridesRef without high-frequency React re-render loops
+  const handleIncomingMCPCommand = useCallback(
+    (cmd: MCPCommandPayload) => {
+      const { tool, params, agentName } = cmd;
+      setIsSorting(true);
+      setActiveToolName(`${tool}()`);
+
+      if (tool === 'sort_spheres') {
+        // Clear any single-node coordinate overrides unless explicit coordinates map was provided
+        coordinateOverridesRef.current = params.coordinates ? { ...params.coordinates } : {};
+        const nextFormation = params.formation || 'daily-flow';
+        setFormation(nextFormation);
+        if (typeof params.explosionLevel === 'number') {
+          setExplosionLevel(params.explosionLevel);
+        } else if (nextFormation === 'clusters') {
+          setExplosionLevel(0.9);
+        }
+        setSelectedFileId(null);
+        setFocusedCategoryId(null);
+
+        setToolTraces((prev) => [
+          {
+            id: cmd.id || `mcp-${Date.now()}`,
+            agentName: agentName || agentLabel,
+            toolName: `sort_spheres(${nextFormation})`,
+            querySummary: `Mutated 3D sphere coordinates into "${nextFormation}" structure`,
+            scannedCount: files.length,
+            matchedCount: files.length,
+            timestamp: cmd.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          ...prev.slice(0, 7),
+        ]);
+      } else if (tool === 'highlight_node') {
+        const targetId = params.nodeId;
+        const targetNode = files.find((f) => f.id === targetId) || files[0];
+        if (targetNode) {
+          // Mutate coordinate override ref to pull highlighted node to front inspection stage
+          coordinateOverridesRef.current = {
+            ...coordinateOverridesRef.current,
+            [targetNode.id]: [0, 0.85, 4.1],
+            ...(params.coordinates || {}),
+          };
+          setSelectedFileId(targetNode.id);
+          setRetrievedFileIds([targetNode.id]);
+          setFocusedCategoryId(targetNode.categoryId);
+          setExpandedCategoryIds((prev) =>
+            prev.includes(targetNode.categoryId) ? prev : [...prev, targetNode.categoryId]
+          );
+          setCameraPreset('focus');
+          setActiveSheet('inspector');
+
+          setToolTraces((prev) => [
+            {
+              id: cmd.id || `mcp-${Date.now()}`,
+              agentName: agentName || agentLabel,
+              toolName: `highlight_node("${targetNode.id}")`,
+              querySummary: `Highlighted "${targetNode.title}" at front 3D coordinate [0, 0.85, 4.1]`,
+              scannedCount: files.length,
+              matchedCount: 1,
+              timestamp: cmd.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            },
+            ...prev.slice(0, 7),
+          ]);
+        }
+      } else if (tool === 'query_cluster') {
+        coordinateOverridesRef.current = params.coordinates ? { ...params.coordinates } : {};
+        setFormation('clusters');
+        const q = (params.query || '').trim().toLowerCase();
+        const clusterId = params.clusterId;
+
+        let matched: MindFileNode[] = [];
+        if (clusterId) {
+          matched = files.filter((f) => f.categoryId === clusterId);
+          setFocusedCategoryId(clusterId);
+          setExpandedCategoryIds((prev) =>
+            prev.includes(clusterId) ? prev : [...prev, clusterId]
+          );
+        } else if (q) {
+          matched = files.filter(
+            (f) =>
+              f.title.toLowerCase().includes(q) ||
+              f.appName.toLowerCase().includes(q) ||
+              f.locationPath.toLowerCase().includes(q) ||
+              f.summary.toLowerCase().includes(q) ||
+              (f.metadata?.relativePath || '').toLowerCase().includes(q)
+          );
+        }
+
+        // Arrange matched cluster nodes along a front arc via coordinateOverridesRef
+        if (matched.length > 0) {
+          const nextCoords: Record<string, [number, number, number]> = {};
+          const count = Math.min(matched.length, 10);
+          const span = Math.min(count * 1.4, 8.2);
+          matched.slice(0, count).forEach((node, idx) => {
+            const x = count === 1 ? 0 : -span / 2 + (idx / (count - 1)) * span;
+            const y = Math.sin((idx / Math.max(count - 1, 1)) * Math.PI) * 0.5 + 0.55;
+            nextCoords[node.id] = [x, y, 3.7];
+          });
+          coordinateOverridesRef.current = nextCoords;
+        }
+
+        setExplosionLevel(params.explosionLevel ?? 0.95);
+        setRetrievedFileIds(matched.map((m) => m.id));
+        setCameraPreset(clusterId ? 'focus' : 'overview');
+
+        setToolTraces((prev) => [
+          {
+            id: cmd.id || `mcp-${Date.now()}`,
+            agentName: agentName || agentLabel,
+            toolName: `query_cluster(${clusterId || q || 'all'})`,
+            querySummary: `Queried cluster and staged ${matched.length} matching 3D spheres`,
+            scannedCount: files.length,
+            matchedCount: matched.length,
+            timestamp: cmd.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+          ...prev.slice(0, 7),
+        ]);
       }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [categories, connectors]);
+
+      setTimeout(() => {
+        setIsSorting(false);
+        setActiveToolName(null);
+      }, 650);
+    },
+    [files, agentLabel]
+  );
+
+  const { sseConnected, wsConnected, clientId, dispatchMCPCommand } = useAgentBridge({
+    onCommand: handleIncomingMCPCommand,
+    externalWsUrl,
+  });
 
   // Global Cmd+K / Ctrl+K shortcut + Escape / H handling
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        setCmdKOpen((prev) => {
+        setIsQuickLaunchOpen((prev) => {
           const next = !prev;
           if (next) {
-            setCmdKQuery('');
-            setCmdKSelectedIndex(0);
+            setQuickLaunchQuery('');
+            setQuickLaunchIndex(0);
           }
           return next;
         });
@@ -372,9 +473,14 @@ export const App: React.FC = () => {
       }
 
       if (e.key === 'Escape') {
-        if (cmdKOpen) {
+        if (isQuickLaunchOpen) {
           e.preventDefault();
-          setCmdKOpen(false);
+          setIsQuickLaunchOpen(false);
+          return;
+        }
+        if (isConnectorsOpen) {
+          e.preventDefault();
+          setIsConnectorsOpen(false);
           return;
         }
         setActiveSheet('none');
@@ -385,18 +491,12 @@ export const App: React.FC = () => {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
       if (e.key.toLowerCase() === 'h') {
-        setDockCollapsed((prev) => !prev);
+        setIsDockCollapsed((prev) => !prev);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [cmdKOpen]);
-
-  useEffect(() => {
-    if (cmdKOpen) {
-      setTimeout(() => cmdKInputRef.current?.focus(), 20);
-    }
-  }, [cmdKOpen]);
+  }, [isQuickLaunchOpen, isConnectorsOpen]);
 
   const selectedFile = useMemo(
     () => files.find((f) => f.id === selectedFileId) || null,
@@ -412,101 +512,34 @@ export const App: React.FC = () => {
     }
   }, [selectedFile]);
 
-  const agentLabel =
-    connectedAgent === 'gemini'
-      ? 'Gemini'
-      : connectedAgent === 'claude'
-      ? 'Claude'
-      : 'MCP Tool Bridge';
-
-  // Ensure a connected storage source has a corresponding customizable MindCategory sphere
-  const ensureConnectorCategory = (conn: StorageConnectorConfig): string => {
-    const existing = categories.find((c) => c.id === conn.categoryId);
-    if (existing) {
-      return existing.id;
-    }
-    const count = categories.length;
-    const newCat: MindCategory = {
-      id: conn.categoryId,
-      name: conn.name,
-      symbol: conn.symbol,
-      color: conn.color,
-      description: `Connected storage place: ${conn.accountOrPathLabel}`,
-      finish: conn.finish,
-      orbitRadius: 5.0,
-      orbitAngle: (count * (Math.PI * 2)) / (count + 1),
-      elevation: count % 2 === 0 ? 0.7 : -0.7,
-      isConnectorGroup: true,
-    };
-    setCategories((prev) => [...prev, newCat]);
-    return newCat.id;
-  };
-
-  // Trigger a visible 3D sorting wave whenever a tool or formation change runs
-  const triggerVisualToolSort = (
-    toolName: string,
-    targetFormation: FormationMode,
-    matchedIds: string[] = [],
-    summaryText = ''
-  ) => {
-    setIsSorting(true);
-    setActiveToolName(toolName);
-
-    const newTrace: AgentToolTrace = {
-      id: `trace-${Date.now()}`,
-      agentName: agentLabel,
-      toolName,
-      querySummary: summaryText || `Sorted ${files.length} balls into ${targetFormation}`,
-      scannedCount: files.length,
-      matchedCount: matchedIds.length || files.length,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-    setToolTraces((prev) => [newTrace, ...prev.slice(0, 7)]);
-
-    setTimeout(() => {
-      setFormation(targetFormation);
-      if (targetFormation === 'clusters') {
-        setExplosionLevel(0.9);
-      }
-      setIsSorting(false);
-      setActiveToolName(null);
-    }, 680);
-  };
+  const handleDispatchMCP = useCallback(
+    (tool: MCPToolName, params: MCPCommandPayload['params']) => {
+      dispatchMCPCommand(tool, params, agentLabel).catch(() => {
+        // Fallback direct execution if offline
+        handleIncomingMCPCommand({
+          id: `local-${Date.now()}`,
+          tool,
+          params,
+          agentName: agentLabel,
+        });
+      });
+    },
+    [dispatchMCPCommand, handleIncomingMCPCommand, agentLabel]
+  );
 
   const handleSwitchFormation = (nextFormation: FormationMode) => {
-    const toolMap: Record<FormationMode, string> = {
-      clusters: 'group_by_color_spheres',
-      'daily-flow': 'sort_daily_workload',
-      'app-grid': 'align_app_columns',
-      kaleidoscope: 'form_kaleidoscope_mandala',
-      'caught-up-smile': 'form_caught_up_smile',
-    };
-    setSelectedFileId(null);
-    setFocusedCategoryId(null);
-    triggerVisualToolSort(
-      toolMap[nextFormation],
-      nextFormation,
-      [],
-      `Switched 3D structure to ${nextFormation}`
-    );
+    handleDispatchMCP('sort_spheres', { formation: nextFormation });
   };
 
   const handleMarkAllCaughtUp = () => {
     setFiles((prev) =>
       prev.map((f) => ({ ...f, workloadPriority: 'caught-up' }))
     );
-    setSelectedFileId(null);
-    setFocusedCategoryId(null);
-    setRetrievedFileIds([]);
-    triggerVisualToolSort(
-      'mark_all_caught_up_smile',
-      'caught-up-smile',
-      files.map((f) => f.id),
-      'All daily items marked Caught Up! Forming 3D Smile.'
-    );
+    handleDispatchMCP('sort_spheres', { formation: 'caught-up-smile' });
   };
 
   const handleToggleExplodeAll = () => {
+    coordinateOverridesRef.current = {};
     if (formation !== 'clusters') {
       setFormation('clusters');
       setExplosionLevel(1.0);
@@ -521,12 +554,6 @@ export const App: React.FC = () => {
       setRetrievedFileIds([]);
       setCameraPreset('overview');
     } else {
-      triggerVisualToolSort(
-        'break_apart_all_clusters',
-        'clusters',
-        files.map((f) => f.id),
-        'Broke apart all color spheres into individual app balls'
-      );
       setExplosionLevel(1.0);
       setExpandedCategoryIds(categories.map((c) => c.id));
       setCameraPreset('overview');
@@ -534,18 +561,14 @@ export const App: React.FC = () => {
   };
 
   const handleSelectCategory = (categoryId: string) => {
+    coordinateOverridesRef.current = {};
     setFormation('clusters');
     if (focusedCategoryId === categoryId) {
       setFocusedCategoryId(null);
       setExpandedCategoryIds((prev) => prev.filter((id) => id !== categoryId));
       setCameraPreset('overview');
     } else {
-      setFocusedCategoryId(categoryId);
-      setSelectedFileId(null);
-      setExpandedCategoryIds((prev) =>
-        prev.includes(categoryId) ? prev : [...prev, categoryId]
-      );
-      setCameraPreset('focus');
+      handleDispatchMCP('query_cluster', { clusterId: categoryId, explosionLevel: 0.95 });
     }
   };
 
@@ -564,320 +587,66 @@ export const App: React.FC = () => {
     setActiveSheet('inspector');
   };
 
-  // Real Local Folder Mount via File System Access API (showDirectoryPicker) with <input webkitdirectory> fallback
-  const handleConnectRealFolder = async (conn: StorageConnectorConfig) => {
-    setConnectorStatusBanner(null);
-    setPendingConnectorId(conn.id);
-
-    // Try modern File System Access API first if available in the browser context
-    if ('showDirectoryPicker' in window) {
-      try {
-        const dirHandle = await (window as any).showDirectoryPicker({ mode: 'read' });
-        const folderName = dirHandle.name || 'Connected Folder';
-        const catId = ensureConnectorCategory({
-          ...conn,
-          accountOrPathLabel: `Local Folder · ${folderName}`,
-        });
-
-        const newBalls: MindFileNode[] = [];
-        for await (const entry of dirHandle.values()) {
-          if (newBalls.length >= 16) break;
-          if (entry.kind === 'file') {
-            const fileObj: File = await entry.getFile();
-            let textSnippet = '';
-            if (
-              fileObj.size < 120000 &&
-              /\.(txt|md|json|csv|eml|log|html|ts|js)$/i.test(fileObj.name)
-            ) {
-              try {
-                const raw = await fileObj.text();
-                textSnippet = raw.slice(0, 600);
-              } catch {
-                textSnippet = '';
-              }
-            }
-            newBalls.push({
-              id: `conn-${conn.id}-${Date.now()}-${newBalls.length}`,
-              title: fileObj.name,
-              categoryId: catId,
-              appSymbol: conn.symbol,
-              appName: conn.name,
-              locationPath: `${folderName} · ${fileObj.name}`,
-              storageDrive: folderName,
-              fileKind: inferFileKind(fileObj.name),
-              sizeLabel: formatByteSize(fileObj.size),
-              updatedAt: new Date(fileObj.lastModified || Date.now()).toLocaleDateString(),
-              summary: `Mounted from ${folderName} (${formatByteSize(fileObj.size)})`,
-              content:
-                textSnippet ||
-                `File: ${fileObj.name}\nDescriptive Location: ${folderName} → ${fileObj.name}\nSize: ${formatByteSize(fileObj.size)}`,
-              importance: 1.1,
-              workloadPriority: 'today',
-            });
-          }
-        }
-
-        if (newBalls.length > 0) {
-          applyConnectedBalls(conn, catId, `Folder · ${folderName}`, newBalls);
-        } else {
-          setConnectorStatusBanner(`Selected folder "${folderName}" had no readable files.`);
-        }
-        return;
-      } catch (err: any) {
-        if (err?.name === 'AbortError') return;
-        // If blocked by cross-origin iframe security policy, smoothly fall back to <input webkitdirectory>
+  // Ingest real parsed directory/files or Gmail API messages into the 3D scene
+  const handleIngestDirectoryAndFiles = (
+    connectorId: string,
+    category: MindCategory,
+    newNodes: MindFileNode[],
+    sourceLabel: string
+  ) => {
+    coordinateOverridesRef.current = {};
+    setCategories((prev) => {
+      const exists = prev.some((c) => c.id === category.id);
+      if (exists) {
+        return prev.map((c) => (c.id === category.id ? category : c));
       }
-    }
-
-    // Fallback to standard directory input
-    if (folderInputRef.current) {
-      folderInputRef.current.value = '';
-      folderInputRef.current.click();
-    }
-  };
-
-  const handleFolderInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-
-    const conn =
-      connectors.find((c) => c.id === pendingConnectorId) || connectors[0];
-    const firstRelative = (fileList[0] as any).webkitRelativePath || fileList[0].name;
-    const rootFolderName = firstRelative.includes('/')
-      ? firstRelative.split('/')[0]
-      : conn.name;
-
-    const catId = ensureConnectorCategory({
-      ...conn,
-      accountOrPathLabel: `Folder · ${rootFolderName}`,
+      return [...prev, category];
     });
 
-    const selectedFiles = Array.from(fileList)
-      .filter((f) => !f.name.startsWith('.'))
-      .slice(0, 16);
+    setFiles((prev) => {
+      const existingIds = new Set(newNodes.map((n) => n.id));
+      const filtered = prev.filter((f) => !existingIds.has(f.id));
+      return [...newNodes, ...filtered];
+    });
 
-    const newBalls: MindFileNode[] = [];
-    for (let i = 0; i < selectedFiles.length; i++) {
-      const fileObj = selectedFiles[i];
-      const relPath = (fileObj as any).webkitRelativePath || `${rootFolderName}/${fileObj.name}`;
-      let snippet = '';
-      if (
-        fileObj.size < 120000 &&
-        /\.(txt|md|json|csv|eml|mbox|log)$/i.test(fileObj.name)
-      ) {
-        try {
-          const raw = await fileObj.text();
-          snippet = raw.slice(0, 600);
-        } catch {
-          snippet = '';
-        }
-      }
-
-      newBalls.push({
-        id: `folder-${conn.id}-${Date.now()}-${i}`,
-        title: fileObj.name,
-        categoryId: catId,
-        appSymbol: conn.symbol,
-        appName: conn.name,
-        locationPath: relPath.replace(/\//g, ' · '),
-        storageDrive: rootFolderName,
-        fileKind: inferFileKind(fileObj.name),
-        sizeLabel: formatByteSize(fileObj.size),
-        updatedAt: new Date(fileObj.lastModified || Date.now()).toLocaleDateString(),
-        summary: `Connected from ${rootFolderName} (${formatByteSize(fileObj.size)})`,
-        content:
-          snippet ||
-          `File: ${fileObj.name}\nDescriptive Location: ${relPath.replace(/\//g, ' → ')}\nSize: ${formatByteSize(fileObj.size)}`,
-        importance: 1.1,
-        workloadPriority: 'today',
-      });
-    }
-
-    applyConnectedBalls(conn, catId, `Folder · ${rootFolderName}`, newBalls);
-  };
-
-  // Handle importing real files (.txt WhatsApp chat export, .json Discord export, .eml email files, etc.)
-  const handleTriggerFileImport = (conn: StorageConnectorConfig) => {
-    setConnectorStatusBanner(null);
-    setPendingConnectorId(conn.id);
-    if (fileImportInputRef.current) {
-      fileImportInputRef.current.value = '';
-      fileImportInputRef.current.click();
-    }
-  };
-
-  const handleFileImportChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-
-    const conn =
-      connectors.find((c) => c.id === pendingConnectorId) || connectors[0];
-    const catId = ensureConnectorCategory(conn);
-
-    const newBalls: MindFileNode[] = [];
-    const uploaded = Array.from(fileList).slice(0, 14);
-
-    for (let i = 0; i < uploaded.length; i++) {
-      const fileObj = uploaded[i];
-      let rawText = '';
-      if (fileObj.size < 350000) {
-        try {
-          rawText = await fileObj.text();
-        } catch {
-          rawText = '';
-        }
-      }
-
-      // If it's a WhatsApp .txt export or Discord .json export, parse out meaningful message threads
-      if (conn.provider === 'whatsapp' && rawText && rawText.includes(':')) {
-        const lines = rawText
-          .split('\n')
-          .map((l) => l.trim())
-          .filter(Boolean);
-        const previewLines = lines.slice(-12).join('\n');
-        newBalls.push({
-          id: `wa-${Date.now()}-${i}`,
-          title: fileObj.name.replace(/\.txt$/i, ''),
-          categoryId: catId,
-          appSymbol: 'W',
-          appName: 'WhatsApp',
-          locationPath: `WhatsApp · ${fileObj.name}`,
-          storageDrive: 'WhatsApp Export',
-          fileKind: 'chat',
-          sizeLabel: `${lines.length} msgs`,
-          updatedAt: 'Connected just now',
-          summary: `WhatsApp conversation thread (${lines.length} messages indexed)`,
-          content: previewLines || rawText.slice(0, 600),
-          importance: 1.2,
-          workloadPriority: 'today',
-        });
-      } else {
-        newBalls.push({
-          id: `imp-${conn.id}-${Date.now()}-${i}`,
-          title: fileObj.name,
-          categoryId: catId,
-          appSymbol: conn.symbol,
-          appName: conn.name,
-          locationPath: `${conn.name} · ${fileObj.name}`,
-          storageDrive: conn.name,
-          fileKind: inferFileKind(fileObj.name),
-          sizeLabel: formatByteSize(fileObj.size),
-          updatedAt: 'Connected just now',
-          summary: `Imported into ${conn.name} color sphere (${formatByteSize(fileObj.size)})`,
-          content:
-            rawText.slice(0, 650) ||
-            `${fileObj.name}\nDescriptive Location: ${conn.name} → ${fileObj.name}`,
-          importance: 1.15,
-          workloadPriority: 'today',
-        });
-      }
-    }
-
-    applyConnectedBalls(
-      conn,
-      catId,
-      `${conn.name} (${uploaded.length} imported)`,
-      newBalls
-    );
-  };
-
-  const finalizeDiscordConnection = (label: string) => {
-    const conn = connectors.find((c) => c.provider === 'discord');
-    if (!conn) return;
-    const catId = ensureConnectorCategory({ ...conn, accountOrPathLabel: label });
-
-    const discordBalls: MindFileNode[] = [
-      {
-        id: `discord-pin-${Date.now()}-1`,
-        title: 'Product Launch Room #design-pins',
-        categoryId: catId,
-        appSymbol: 'D',
-        appName: 'Discord',
-        locationPath: 'Discord · #design-pins Channel',
-        storageDrive: 'Discord Server',
-        fileKind: 'chat',
-        sizeLabel: 'Pinned Thread',
-        updatedAt: 'Synced just now',
-        summary: 'Pinned Figma links, brand color palette tokens, and release assets shared in Discord.',
-        content: `Channel: #design-pins\nDescriptive Location: Discord → Product Launch Server → #design-pins\n\n• Updated 3D sphere shaders approved\n• Final icon bundle pinned by @alex`,
-        importance: 1.2,
-        workloadPriority: 'urgent',
-      },
-      {
-        id: `discord-pin-${Date.now()}-2`,
-        title: 'Community Feedback & Feature Links',
-        categoryId: catId,
-        appSymbol: 'D',
-        appName: 'Discord',
-        locationPath: 'Discord · #feedback-vault Channel',
-        storageDrive: 'Discord Server',
-        fileKind: 'chat',
-        sizeLabel: '14 Bookmarks',
-        updatedAt: 'Synced just now',
-        summary: 'Saved voice-note summaries and user feature requests from #feedback-vault.',
-        content: `Channel: #feedback-vault\nDescriptive Location: Discord → #feedback-vault\n\n• Everyday users love color-coordinated spheres with zero string clutter\n• Cmd+K quick-launch shortcut requested for instant tool calls`,
-        importance: 1.1,
-        workloadPriority: 'today',
-      },
-    ];
-
-    applyConnectedBalls(conn, catId, label, discordBalls);
-  };
-
-  const handleConnectDiscordOAuth = async (conn: StorageConnectorConfig) => {
-    setConnectorStatusBanner(null);
-    try {
-      const redirectUri = `${window.location.origin}/auth/callback`;
-      const res = await fetch(
-        `/api/auth/discord/url?redirectUri=${encodeURIComponent(redirectUri)}`
-      );
-      const data = await res.json();
-      if (res.ok && data.url) {
-        window.open(data.url, 'discord_oauth_popup', 'width=560,height=680');
-        return;
-      }
-      // If DISCORD_CLIENT_ID is not configured in .env, let the user either import files or sync their Discord channel vault directly
-      finalizeDiscordConnection('Discord · Connected Channel Pins & Bookmarks');
-    } catch {
-      finalizeDiscordConnection('Discord · Connected Channel Pins & Bookmarks');
-    }
-  };
-
-  const applyConnectedBalls = (
-    conn: StorageConnectorConfig,
-    catId: string,
-    label: string,
-    newBalls: MindFileNode[]
-  ) => {
-    setFiles((prev) => [...newBalls, ...prev]);
     setConnectors((prev) =>
-      prev.map((item) =>
-        item.id === conn.id
+      prev.map((c) =>
+        c.id === connectorId
           ? {
-              ...item,
+              ...c,
+              categoryId: category.id,
               connected: true,
-              accountOrPathLabel: label,
-              itemCount: item.itemCount + newBalls.length,
-              lastSynced: 'Just now',
+              accountOrPathLabel: sourceLabel,
+              itemCount: newNodes.length,
+              lastSynced: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             }
-          : item
+          : c
       )
     );
-    setFocusedCategoryId(catId);
-    setExpandedCategoryIds((prev) => (prev.includes(catId) ? prev : [...prev, catId]));
-    setRetrievedFileIds(newBalls.map((b) => b.id));
-    setConnectorStatusBanner(
-      `Connected "${conn.name}" — added ${newBalls.length} color-coded 3D balls to the "${conn.name}" sphere!`
+
+    setFormation('clusters');
+    setFocusedCategoryId(category.id);
+    setExpandedCategoryIds((prev) =>
+      prev.includes(category.id) ? prev : [...prev, category.id]
     );
-    triggerVisualToolSort(
-      `mount_connector_${conn.provider.replace('-', '_')}`,
-      'clusters',
-      newBalls.map((b) => b.id),
-      `Connected ${conn.name} and indexed ${newBalls.length} balls`
-    );
+    setExplosionLevel(0.95);
+    setRetrievedFileIds(newNodes.slice(0, 8).map((n) => n.id));
+    setCameraPreset('focus');
+
+    setToolTraces((prev) => [
+      {
+        id: `ingest-${Date.now()}`,
+        agentName: 'Filesystem Ingestor',
+        toolName: 'mapDirectoryEntriesToSceneNodes',
+        querySummary: `Ingested ${newNodes.length} real nodes from ${sourceLabel}`,
+        scannedCount: newNodes.length,
+        matchedCount: newNodes.length,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+      ...prev.slice(0, 7),
+    ]);
   };
 
-  // Update a connector's custom color / finish and keep its 3D Category Sphere in sync
   const handleUpdateConnectorStyle = (
     connId: string,
     updates: Partial<Pick<StorageConnectorConfig, 'color' | 'finish' | 'symbol' | 'name'>>
@@ -912,6 +681,7 @@ export const App: React.FC = () => {
       setChatInput('');
     }
     setChatError(null);
+    coordinateOverridesRef.current = {};
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -945,7 +715,7 @@ export const App: React.FC = () => {
 
       const action = data.action || 'NONE';
       const returnedFormation = (data.formation as FormationMode) || 'clusters';
-      const toolCalled = data.toolCalled || 'locate_and_pull_balls';
+      const toolCalled = data.toolCalled || 'sort_spheres';
 
       setActiveToolName(toolCalled);
 
@@ -1161,7 +931,6 @@ export const App: React.FC = () => {
     setCategories((prev) =>
       prev.map((c) => (c.id === catId ? { ...c, ...updates } : c))
     );
-    // Keep connector style synced if this category belongs to a connector
     setConnectors((prev) =>
       prev.map((conn) =>
         conn.categoryId === catId
@@ -1192,102 +961,11 @@ export const App: React.FC = () => {
         f.title.toLowerCase().includes(q) ||
         f.appName.toLowerCase().includes(q) ||
         f.locationPath.toLowerCase().includes(q) ||
-        f.summary.toLowerCase().includes(q)
+        f.summary.toLowerCase().includes(q) ||
+        (f.metadata?.relativePath || '').toLowerCase().includes(q)
       );
     });
   }, [files, focusedCategoryId, searchQuery]);
-
-  // Quick-Launch (Cmd+K) Results: Tools + Matching Files
-  const cmdKToolActions = useMemo(
-    () => [
-      {
-        id: 'tool-daily-flow',
-        label: 'Run Tool: sort_daily_workload()',
-        subtitle: 'Arrange 3D balls into Today’s Priority Runway vs Caught Up',
-        badge: '3D TOOL',
-        run: () => {
-          setCmdKOpen(false);
-          handleSwitchFormation('daily-flow');
-        },
-      },
-      {
-        id: 'tool-smile',
-        label: 'Run Tool: form_caught_up_smile()',
-        subtitle: 'Mark all items Caught Up and form the cheerful 3D Smile',
-        badge: '3D TOOL',
-        run: () => {
-          setCmdKOpen(false);
-          handleMarkAllCaughtUp();
-        },
-      },
-      {
-        id: 'tool-app-grid',
-        label: 'Run Tool: align_app_columns()',
-        subtitle: 'Snap all balls into vertical columns by App Emblem (F, D, W, G, P)',
-        badge: '3D TOOL',
-        run: () => {
-          setCmdKOpen(false);
-          handleSwitchFormation('app-grid');
-        },
-      },
-      {
-        id: 'tool-kaleidoscope',
-        label: 'Run Tool: form_kaleidoscope_mandala()',
-        subtitle: 'Arrange balls into a symmetrical color-coordinated mandala',
-        badge: '3D TOOL',
-        run: () => {
-          setCmdKOpen(false);
-          handleSwitchFormation('kaleidoscope');
-        },
-      },
-      {
-        id: 'tool-explode',
-        label: 'Run Tool: break_apart_all_clusters()',
-        subtitle: 'Break apart or group all color spheres in 3D space',
-        badge: '3D TOOL',
-        run: () => {
-          setCmdKOpen(false);
-          handleToggleExplodeAll();
-        },
-      },
-      {
-        id: 'tool-connectors',
-        label: 'Open Storage & Folder Connectors',
-        subtitle: 'Connect Local Folders, Discord, WhatsApp, or Email Archives into custom color spheres',
-        badge: 'CONNECT',
-        run: () => {
-          setCmdKOpen(false);
-          setActiveSheet('connectors');
-        },
-      },
-    ],
-    [formation, explosionLevel, files, categories]
-  );
-
-  const cmdKMatchingTools = useMemo(() => {
-    const q = cmdKQuery.trim().toLowerCase();
-    if (!q) return cmdKToolActions;
-    return cmdKToolActions.filter(
-      (t) =>
-        t.label.toLowerCase().includes(q) ||
-        t.subtitle.toLowerCase().includes(q)
-    );
-  }, [cmdKQuery, cmdKToolActions]);
-
-  const cmdKMatchingFiles = useMemo(() => {
-    const q = cmdKQuery.trim().toLowerCase();
-    if (!q) return files.slice(0, 6);
-    return files
-      .filter(
-        (f) =>
-          f.title.toLowerCase().includes(q) ||
-          f.appName.toLowerCase().includes(q) ||
-          f.locationPath.toLowerCase().includes(q) ||
-          f.summary.toLowerCase().includes(q) ||
-          f.content.toLowerCase().includes(q)
-      )
-      .slice(0, 8);
-  }, [cmdKQuery, files]);
 
   const urgentOrTodayCount = useMemo(
     () => files.filter((f) => f.workloadPriority !== 'caught-up').length,
@@ -1303,26 +981,6 @@ export const App: React.FC = () => {
     <div className="relative w-screen h-screen overflow-hidden bg-[#F8FAFC] text-slate-900 font-sans">
       <OfflineIndicator />
 
-      {/* Hidden Real File & Directory Inputs for Storage Connectors */}
-      <input
-        ref={folderInputRef}
-        type="file"
-        multiple
-        // @ts-expect-error webkitdirectory is standard across desktop browsers for mounting folders
-        webkitdirectory=""
-        directory=""
-        className="hidden"
-        onChange={handleFolderInputChange}
-      />
-      <input
-        ref={fileImportInputRef}
-        type="file"
-        multiple
-        accept=".txt,.md,.json,.csv,.eml,.mbox,.pdf,.png,.jpg,.jpeg,.doc,.docx"
-        className="hidden"
-        onChange={handleFileImportChange}
-      />
-
       {/* Top Bar Contract: 1-row, 3-zone header */}
       <header className="fixed top-0 left-0 right-0 z-30 flex items-center justify-between gap-6 px-6 py-3.5 bg-white/85 backdrop-blur-xl border-b border-slate-200/80 shadow-xs">
         {/* Zone 1: Brand Title */}
@@ -1330,6 +988,7 @@ export const App: React.FC = () => {
           href="#workspace"
           onClick={(e) => {
             e.preventDefault();
+            coordinateOverridesRef.current = {};
             setActiveSheet('none');
             setFormation('clusters');
             setFocusedCategoryId(null);
@@ -1348,13 +1007,14 @@ export const App: React.FC = () => {
             href="#workspace"
             onClick={(e) => {
               e.preventDefault();
+              coordinateOverridesRef.current = {};
               setActiveSheet('none');
               setFocusedCategoryId(null);
               setSelectedFileId(null);
               setCameraPreset('overview');
             }}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
-              activeSheet === 'none'
+              activeSheet === 'none' && !isConnectorsOpen
                 ? 'text-blue-600 underline underline-offset-8 decoration-2 decoration-blue-600'
                 : ''
             }`}
@@ -1365,10 +1025,10 @@ export const App: React.FC = () => {
             href="#connectors"
             onClick={(e) => {
               e.preventDefault();
-              setActiveSheet(activeSheet === 'connectors' ? 'none' : 'connectors');
+              setIsConnectorsOpen(true);
             }}
             className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
-              activeSheet === 'connectors'
+              isConnectorsOpen
                 ? 'text-blue-600 underline underline-offset-8 decoration-2 decoration-blue-600'
                 : ''
             }`}
@@ -1401,7 +1061,7 @@ export const App: React.FC = () => {
                 : ''
             }`}
           >
-            My Items
+            My Items ({files.length})
           </a>
           <a
             href="#colors"
@@ -1415,7 +1075,7 @@ export const App: React.FC = () => {
                 : ''
             }`}
           >
-            Colors & Groups
+            Colors &amp; Groups
           </a>
         </nav>
 
@@ -1424,12 +1084,12 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => {
-              setCmdKQuery('');
-              setCmdKSelectedIndex(0);
-              setCmdKOpen(true);
+              setQuickLaunchQuery('');
+              setQuickLaunchIndex(0);
+              setIsQuickLaunchOpen(true);
             }}
             className="flex items-center gap-2 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200/80 border border-slate-200/90 rounded-xl transition-colors whitespace-nowrap shrink-0"
-            title="Open Quick-Launch Search & Tool Bar (Cmd+K / Ctrl+K)"
+            title="Open Quick-Launch Search & MCP Tool Bar (Cmd+K / Ctrl+K)"
           >
             <Search size={13} className="text-slate-500" />
             <span className="hidden sm:inline">Quick Launch</span>
@@ -1450,8 +1110,8 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Full-Viewport 3D Descriptive Location Engine */}
-      <main className="w-full h-full">
+      {/* Full-Viewport 3D Descriptive Location Engine (retains full pointer events behind collapsed dock) */}
+      <main className="w-full h-full pointer-events-auto">
         <SpatialMindMap
           categories={categories}
           files={files}
@@ -1465,439 +1125,70 @@ export const App: React.FC = () => {
           activeToolName={activeToolName}
           searchQuery={searchQuery}
           cameraPreset={cameraPreset}
+          coordinateOverridesRef={coordinateOverridesRef}
           onSelectCategory={handleSelectCategory}
           onSelectFile={handleSelectFile}
           onToggleExplodeAll={handleToggleExplodeAll}
         />
       </main>
 
-      {/* Global Cmd+K Quick-Launch Overlay (Search All Files & Trigger Tool Calls Without Dock) */}
-      {cmdKOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-slate-900/35 backdrop-blur-sm"
-          onClick={() => setCmdKOpen(false)}
-        >
-          <div
-            className="w-full max-w-2xl bg-white/95 backdrop-blur-2xl border border-slate-200 rounded-2xl shadow-2xl overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Search & Agent Tool Input Bar */}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (cmdKQuery.trim()) {
-                  const q = cmdKQuery.trim();
-                  setCmdKOpen(false);
-                  sendMessage(q);
-                } else if (cmdKMatchingTools[0]) {
-                  cmdKMatchingTools[0].run();
-                }
-              }}
-              className="flex items-center gap-3 px-4 py-3.5 border-b border-slate-200/80"
-            >
-              <Command size={18} className="text-blue-600 shrink-0" />
-              <input
-                ref={cmdKInputRef}
-                type="text"
-                value={cmdKQuery}
-                onChange={(e) => {
-                  setCmdKQuery(e.target.value);
-                  setCmdKSelectedIndex(0);
-                }}
-                placeholder="Search across all 3D balls, or type an Agent Tool request and press Enter..."
-                className="flex-1 text-sm text-slate-900 placeholder-slate-400 bg-transparent focus:outline-none"
-              />
-              {cmdKQuery.trim() && (
-                <button
-                  type="submit"
-                  className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
-                >
-                  Ask {agentLabel} ↵
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setCmdKOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
-              >
-                <X size={16} />
-              </button>
-            </form>
+      {/* Modal 1 (z-50): Global Cmd+K QuickLaunchModal */}
+      <QuickLaunchModal
+        isOpen={isQuickLaunchOpen}
+        onClose={() => setIsQuickLaunchOpen(false)}
+        query={quickLaunchQuery}
+        onQueryChange={setQuickLaunchQuery}
+        selectedIndex={quickLaunchIndex}
+        onSelectIndex={setQuickLaunchIndex}
+        agentLabel={agentLabel}
+        categories={categories}
+        files={files}
+        onSelectFile={handleSelectFile}
+        onSendMessage={sendMessage}
+        onDispatchMCP={handleDispatchMCP}
+        onOpenConnectors={() => setIsConnectorsOpen(true)}
+      />
 
-            <div className="max-h-[62vh] overflow-y-auto p-3 space-y-4">
-              {/* Direct Agent Prompt Dispatch if user typed a query */}
-              {cmdKQuery.trim() && (
-                <div>
-                  <div className="px-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    Dispatch Live Agent Location Tool Call
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const q = cmdKQuery.trim();
-                      setCmdKOpen(false);
-                      sendMessage(q);
-                    }}
-                    className="w-full p-3 rounded-xl bg-blue-50/90 hover:bg-blue-100/80 border border-blue-200 flex items-center justify-between gap-3 text-left transition-colors"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <Cpu size={16} className="text-blue-600 shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold text-slate-900 truncate">
-                          {agentLabel} Tool Call: &ldquo;{cmdKQuery.trim()}&rdquo;
-                        </div>
-                        <div className="text-[11px] text-slate-600">
-                          Physically sorts the 3D balls and pulls matching files to the front
-                        </div>
-                      </div>
-                    </div>
-                    <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-blue-600 text-white rounded-md shrink-0">
-                      Enter ↵
-                    </span>
-                  </button>
-                </div>
-              )}
+      {/* Modal 2 (z-50): ConnectorsModal (Real Local Directory Ingestion + Gmail OAuth 2.0 Config) */}
+      <ConnectorsModal
+        isOpen={isConnectorsOpen}
+        onClose={() => setIsConnectorsOpen(false)}
+        categories={categories}
+        connectors={connectors}
+        onIngestDirectoryAndFiles={handleIngestDirectoryAndFiles}
+        onUpdateConnectorStyle={handleUpdateConnectorStyle}
+        onFocusCategory={(catId) => {
+          setFormation('clusters');
+          setFocusedCategoryId(catId);
+          setExpandedCategoryIds((prev) => (prev.includes(catId) ? prev : [...prev, catId]));
+          setExplosionLevel(0.95);
+          setCameraPreset('focus');
+        }}
+      />
 
-              {/* Matching 3D Location Engine Tools */}
-              {cmdKMatchingTools.length > 0 && (
-                <div>
-                  <div className="px-2.5 pb-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    Instant 3D Structure & Engine Tools
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                    {cmdKMatchingTools.map((tool, idx) => (
-                      <button
-                        key={tool.id}
-                        type="button"
-                        onClick={tool.run}
-                        className={`p-2.5 rounded-xl border text-left transition-colors flex items-start justify-between gap-2 ${
-                          cmdKSelectedIndex === idx && !cmdKQuery
-                            ? 'bg-slate-100 border-slate-300'
-                            : 'bg-slate-50/70 hover:bg-slate-100 border-slate-200/70'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="text-xs font-bold text-slate-900 truncate">
-                            {tool.label}
-                          </div>
-                          <div className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">
-                            {tool.subtitle}
-                          </div>
-                        </div>
-                        <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold bg-white text-slate-600 border border-slate-200 rounded shrink-0">
-                          {tool.badge}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Matching File Balls Across All Groups & Connected Folders */}
-              <div>
-                <div className="px-2.5 pb-1.5 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  <span>
-                    {cmdKQuery.trim()
-                      ? `Matching 3D File Balls (${cmdKMatchingFiles.length})`
-                      : 'Recent & Priority 3D File Balls'}
-                  </span>
-                  <span>Click to Pull Ball Forward</span>
-                </div>
-
-                {cmdKMatchingFiles.length === 0 ? (
-                  <div className="p-4 text-center text-xs text-slate-500 bg-slate-50 rounded-xl">
-                    No local ball matched &ldquo;{cmdKQuery}&rdquo; — press Enter to have {agentLabel} search and sort semantically!
-                  </div>
-                ) : (
-                  <div className="divide-y divide-slate-100 border border-slate-200/80 rounded-xl overflow-hidden bg-white">
-                    {cmdKMatchingFiles.map((file) => {
-                      const cat = categories.find((c) => c.id === file.categoryId);
-                      return (
-                        <button
-                          key={file.id}
-                          type="button"
-                          onClick={() => {
-                            setCmdKOpen(false);
-                            handleSelectFile(file.id);
-                          }}
-                          className="w-full px-3.5 py-2.5 hover:bg-blue-50/60 flex items-center justify-between gap-3 text-left transition-colors"
-                        >
-                          <div className="flex items-center gap-3 min-w-0">
-                            <span
-                              className="w-8 h-8 rounded-full text-white font-display font-extrabold text-xs flex items-center justify-center shrink-0 shadow-xs"
-                              style={{ backgroundColor: cat?.color || '#2563EB' }}
-                            >
-                              {file.appSymbol}
-                            </span>
-                            <div className="min-w-0">
-                              <div className="text-xs font-bold text-slate-900 truncate">
-                                {file.title}
-                              </div>
-                              <div className="text-[11px] text-slate-500 truncate">
-                                {cat?.name} · {file.locationPath}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className="text-[11px] text-slate-400">{file.appName}</span>
-                            <ArrowUpRight size={14} className="text-slate-400" />
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between text-[11px] text-slate-500">
-              <span>
-                Tip: Press <kbd className="font-mono font-semibold">⌘K</kbd> or{' '}
-                <kbd className="font-mono font-semibold">Ctrl+K</kbd> anytime, even when the bottom dock is hidden.
-              </span>
-              <span>
-                Press <kbd className="font-mono font-semibold">Esc</kbd> to close
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Real Storage & Folder Connectors Sheet (Custom Colors & 3D Spheres) */}
-      {activeSheet === 'connectors' && (
-        <div className="fixed inset-x-0 top-16 z-30 flex justify-center px-4 pointer-events-none">
-          <div className="w-full max-w-4xl bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-2xl p-6 shadow-2xl pointer-events-auto max-h-[70vh] overflow-y-auto space-y-5">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="font-display text-lg font-bold text-slate-900">
-                  Real Folder & Storage Place Connectors
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Connect any place where you store information—local computer folders, Discord channels, WhatsApp exports, email archives, or synced cloud folders. Each connected place gets its own customizable color-coordinated 3D sphere and ball finish!
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveSheet('none')}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            {connectorStatusBanner && (
-              <div className="px-4 py-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
-                  <span>{connectorStatusBanner}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setConnectorStatusBanner(null)}
-                  className="text-emerald-700 hover:text-emerald-900"
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {connectors.map((conn) => (
-                <div
-                  key={conn.id}
-                  className="p-4 rounded-2xl bg-slate-50 border border-slate-200/90 flex flex-col justify-between gap-3.5"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div
-                        className="w-11 h-11 rounded-2xl text-white font-display font-extrabold text-lg flex items-center justify-center shadow-sm shrink-0"
-                        style={{ backgroundColor: conn.color }}
-                      >
-                        {conn.symbol}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-display font-bold text-sm text-slate-900">
-                            {conn.name}
-                          </h3>
-                          {conn.connected && (
-                            <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-100 text-emerald-700 rounded-md">
-                              Connected ({conn.itemCount} balls)
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          {conn.accountOrPathLabel}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Customize Color & 3D Ball Finish right on the Connector */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/70">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[11px] font-medium text-slate-500 mr-1">
-                        Sphere Color:
-                      </span>
-                      {PRESET_COLORS.slice(0, 6).map((hex) => (
-                        <button
-                          key={hex}
-                          type="button"
-                          onClick={() => handleUpdateConnectorStyle(conn.id, { color: hex })}
-                          className={`w-5 h-5 rounded-full transition-transform ${
-                            conn.color.toLowerCase() === hex.toLowerCase()
-                              ? 'scale-125 ring-2 ring-slate-900 ring-offset-1'
-                              : 'opacity-80 hover:opacity-100'
-                          }`}
-                          style={{ backgroundColor: hex }}
-                        />
-                      ))}
-                      <input
-                        type="color"
-                        value={conn.color}
-                        onChange={(e) =>
-                          handleUpdateConnectorStyle(conn.id, { color: e.target.value })
-                        }
-                        className="w-5 h-5 rounded cursor-pointer bg-transparent border-0"
-                        title="Custom color"
-                      />
-                    </div>
-
-                    <select
-                      value={conn.finish}
-                      onChange={(e) =>
-                        handleUpdateConnectorStyle(conn.id, {
-                          finish: e.target.value as MaterialFinish,
-                        })
-                      }
-                      className="px-2 py-1 text-[11px] bg-white border border-slate-200 rounded-lg text-slate-700 font-medium focus:outline-none"
-                    >
-                      {FINISH_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {/* Real Action Buttons per Storage Provider */}
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    {(conn.provider === 'local-folder' || conn.provider === 'cloud-folder') && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => handleConnectRealFolder(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors shadow-2xs"
-                        >
-                          <HardDrive size={13} />
-                          <span>Select Folder from Computer</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleTriggerFileImport(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold transition-colors"
-                        >
-                          <Upload size={13} />
-                          <span>Import Files</span>
-                        </button>
-                      </>
-                    )}
-
-                    {conn.provider === 'discord' && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => handleConnectDiscordOAuth(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-[#5865F2] hover:bg-[#4752C4] text-white text-xs font-semibold transition-colors shadow-2xs"
-                        >
-                          <MessageSquare size={13} />
-                          <span>Connect Discord Channels</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleTriggerFileImport(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold transition-colors"
-                        >
-                          <Upload size={13} />
-                          <span>Import Discord Chat (.json/.txt)</span>
-                        </button>
-                      </>
-                    )}
-
-                    {conn.provider === 'whatsapp' && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => handleTriggerFileImport(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors shadow-2xs"
-                        >
-                          <Upload size={13} />
-                          <span>Import WhatsApp Chat (.txt) or Media</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleConnectRealFolder(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold transition-colors"
-                        >
-                          <FolderOpen size={13} />
-                          <span>Mount WhatsApp Folder</span>
-                        </button>
-                      </>
-                    )}
-
-                    {conn.provider === 'email-vault' && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => handleTriggerFileImport(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors shadow-2xs"
-                        >
-                          <Mail size={13} />
-                          <span>Import .eml / .mbox / PDF Emails</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleConnectRealFolder(conn)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold transition-colors"
-                        >
-                          <FolderOpen size={13} />
-                          <span>Mount Mail Archive Folder</span>
-                        </button>
-                      </>
-                    )}
-
-                    {conn.connected && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActiveSheet('none');
-                          handleSelectCategory(conn.categoryId);
-                        }}
-                        className="ml-auto flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-blue-50 text-blue-700 hover:bg-blue-100 text-xs font-semibold transition-colors"
-                      >
-                        <RefreshCw size={12} />
-                        <span>View 3D Sphere</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Agent Bridge & Live Tool-Call Visualizer Sheet */}
+      {/* Agent Bridge & Live MCP Protocol Sheet */}
       {activeSheet === 'agent-bridge' && (
         <div className="fixed inset-x-0 top-16 z-30 flex justify-center px-4 pointer-events-none">
-          <div className="w-full max-w-3xl bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-2xl p-6 shadow-2xl pointer-events-auto max-h-[65vh] overflow-y-auto space-y-5">
+          <div className="w-full max-w-3xl bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-2xl p-6 shadow-2xl pointer-events-auto max-h-[66vh] overflow-y-auto space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 className="font-display text-lg font-bold text-slate-900">
-                  Descriptive Location Engine · Agent Tool Connector
-                </h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="font-display text-lg font-bold text-slate-900">
+                    Model Context Protocol (MCP) &amp; Agent Bridge
+                  </h2>
+                  <span
+                    className={`px-2 py-0.5 text-[10px] font-mono font-bold rounded-md flex items-center gap-1 ${
+                      sseConnected
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    <Radio size={11} />
+                    <span>{sseConnected ? `SSE Connected (${clientId || 'live'})` : 'Connecting...'}</span>
+                  </span>
+                </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Connect an external AI agent (Gemini, Claude, or MCP) to visually sort through your 3D app balls and return exact file locations.
+                  Listens in real time to <code className="font-mono">/api/mcp/stream</code> and optional local WebSocket servers for <code className="font-mono">sort_spheres</code>, <code className="font-mono">highlight_node</code>, and <code className="font-mono">query_cluster</code> commands.
                 </p>
               </div>
               <button
@@ -1907,6 +1198,36 @@ export const App: React.FC = () => {
               >
                 <X size={18} />
               </button>
+            </div>
+
+            {/* External Local MCP WebSocket Server Input */}
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs">
+                <div className="font-bold text-slate-800">
+                  Optional External Local MCP WebSocket Server
+                </div>
+                <div className="text-slate-500 text-[11px]">
+                  Connect directly to a local MCP agent socket (e.g. <code className="font-mono">ws://localhost:8765/mcp</code>)
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-1 max-w-sm">
+                <input
+                  type="text"
+                  value={externalWsUrl}
+                  onChange={(e) => setExternalWsUrl(e.target.value)}
+                  placeholder="ws://localhost:8765/mcp"
+                  className="flex-1 px-3 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500"
+                />
+                <span
+                  className={`px-2.5 py-1 text-[10px] font-mono font-bold rounded-lg ${
+                    wsConnected
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-slate-200 text-slate-600'
+                  }`}
+                >
+                  {wsConnected ? 'WS LIVE' : 'WS IDLE'}
+                </span>
+              </div>
             </div>
 
             {/* Select Connected Agent */}
@@ -1915,17 +1236,17 @@ export const App: React.FC = () => {
                 {
                   id: 'gemini' as ConnectedAgentId,
                   name: 'Gemini Agent',
-                  desc: 'Connected via server-side tool declarations',
+                  desc: 'Server-side tool declarations via /api/mindmap/chat',
                 },
                 {
                   id: 'claude' as ConnectedAgentId,
                   name: 'Claude Desktop / MCP',
-                  desc: 'Descriptive location tool provider via MCP',
+                  desc: 'Real-time SSE & POST /api/mcp/command bridge',
                 },
                 {
                   id: 'mcp-bridge' as ConnectedAgentId,
-                  name: 'Universal Tool Bridge',
-                  desc: 'Direct JSON location & workload sorting',
+                  name: 'Universal MCP Bridge',
+                  desc: 'Direct 3D coordinate mutation via useAgentBridge',
                 },
               ].map((ag) => (
                 <button
@@ -1946,51 +1267,56 @@ export const App: React.FC = () => {
               ))}
             </div>
 
-            {/* Interactive Agent Tool-Call Triggers (Click to watch the balls sort!) */}
+            {/* Dispatch Structured MCP Commands */}
             <div>
               <div className="text-xs font-bold text-slate-700 mb-2">
-                Test Live Agent Tool Calls (Watch the 3D Balls Sort in Real Time)
+                Dispatch Live MCP Tool Calls over <code className="font-mono">/api/mcp/command</code>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     setActiveSheet('none');
-                    sendMessage('Sort my Daily Workload flow and show what needs attention today');
+                    handleDispatchMCP('sort_spheres', { formation: 'daily-flow' });
                   }}
-                  className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
+                  className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-mono font-semibold transition-colors"
                 >
-                  Run Tool: sort_daily_workload()
+                  sort_spheres({`{ formation: "daily-flow" }`})
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     setActiveSheet('none');
-                    sendMessage('Find my urgent work proposals and pull those balls forward');
+                    handleDispatchMCP('highlight_node', {
+                      nodeId: files[0]?.id || 'work-gmail-proposal',
+                    });
                   }}
-                  className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors"
+                  className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-mono font-semibold transition-colors"
                 >
-                  Run Tool: locate_and_pull_balls()
+                  highlight_node({`{ nodeId: "${files[0]?.id || 'work-gmail-proposal'}" }`})
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     setActiveSheet('none');
-                    handleSwitchFormation('app-grid');
+                    handleDispatchMCP('query_cluster', {
+                      clusterId: 'work',
+                      explosionLevel: 0.95,
+                    });
                   }}
-                  className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition-colors"
+                  className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-mono font-semibold transition-colors"
                 >
-                  Run Tool: align_app_columns()
+                  query_cluster({`{ clusterId: "work" }`})
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     setActiveSheet('none');
-                    handleSwitchFormation('kaleidoscope');
+                    handleDispatchMCP('sort_spheres', { formation: 'kaleidoscope' });
                   }}
-                  className="px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-semibold transition-colors"
+                  className="px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-mono font-semibold transition-colors"
                 >
-                  Run Tool: form_kaleidoscope_mandala()
+                  sort_spheres({`{ formation: "kaleidoscope" }`})
                 </button>
                 <button
                   type="button"
@@ -1998,9 +1324,9 @@ export const App: React.FC = () => {
                     setActiveSheet('none');
                     handleMarkAllCaughtUp();
                   }}
-                  className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-semibold transition-colors"
+                  className="px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 text-xs font-mono font-semibold transition-colors"
                 >
-                  Run Tool: form_caught_up_smile()
+                  sort_spheres({`{ formation: "caught-up-smile" }`})
                 </button>
               </div>
             </div>
@@ -2008,7 +1334,7 @@ export const App: React.FC = () => {
             {/* Recent Tool Execution Trace Log */}
             <div>
               <div className="text-xs font-bold text-slate-700 mb-2">
-                Recent Location Engine Tool Executions
+                Live MCP &amp; Location Engine Execution Log
               </div>
               <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-slate-50 overflow-hidden">
                 {toolTraces.map((tr) => (
@@ -2024,7 +1350,7 @@ export const App: React.FC = () => {
                       <span className="text-slate-600 truncate">{tr.querySummary}</span>
                     </div>
                     <div className="text-slate-500 shrink-0 tabular-nums">
-                      {tr.matchedCount}/{tr.scannedCount} balls · {tr.timestamp}
+                      {tr.matchedCount}/{tr.scannedCount} nodes · {tr.timestamp}
                     </div>
                   </div>
                 ))}
@@ -2055,6 +1381,8 @@ export const App: React.FC = () => {
                           <span>{cat?.name || 'Group'}</span>
                           <span aria-hidden="true">·</span>
                           <span>{selectedFile.appName}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{selectedFile.sizeLabel}</span>
                           <span aria-hidden="true">·</span>
                           <span>{selectedFile.updatedAt}</span>
                         </div>
@@ -2091,26 +1419,55 @@ export const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Descriptive Location Bar */}
-                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200/80 mb-4">
+                  {/* Descriptive Location & Real File Metadata Bar */}
+                  <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200/80 mb-3">
                     <div className="flex items-center gap-2.5 text-xs font-semibold text-slate-700 truncate">
                       <FolderOpen size={15} className="shrink-0 text-blue-600" />
-                      <span>Descriptive Location: {selectedFile.locationPath}</span>
+                      <span>
+                        {selectedFile.metadata?.relativePath || selectedFile.locationPath}
+                      </span>
                     </div>
                     <button
                       type="button"
-                      onClick={() => copyFilePath(selectedFile.locationPath)}
+                      onClick={() =>
+                        copyFilePath(
+                          selectedFile.metadata?.relativePath || selectedFile.locationPath
+                        )
+                      }
                       className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
                     >
                       {copiedPath ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
-                      <span>{copiedPath ? 'Copied' : 'Copy Location'}</span>
+                      <span>{copiedPath ? 'Copied' : 'Copy Path'}</span>
                     </button>
                   </div>
+
+                  {selectedFile.metadata && (
+                    <div className="grid grid-cols-3 gap-2 mb-4 text-[11px] bg-slate-50/70 p-2.5 rounded-xl border border-slate-200/60">
+                      <div>
+                        <span className="text-slate-400 block">MIME Type</span>
+                        <span className="font-mono font-semibold text-slate-700">
+                          {selectedFile.metadata.mimeType}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">Exact Size</span>
+                        <span className="font-mono font-semibold text-slate-700">
+                          {selectedFile.metadata.sizeBytes.toLocaleString()} bytes
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">Modified ISO</span>
+                        <span className="font-mono font-semibold text-slate-700">
+                          {selectedFile.metadata.lastModifiedISO.slice(0, 10)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Workload Status + Color Group Switcher */}
                   <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100 text-xs text-slate-500">
                     <div className="flex items-center gap-1.5">
-                      <span className="font-medium">Workload Status:</span>
+                      <span className="font-medium">Workload:</span>
                       {(
                         [
                           { id: 'urgent', label: 'Urgent Today' },
@@ -2222,7 +1579,7 @@ export const App: React.FC = () => {
                       <p className="text-sm text-slate-600 leading-relaxed mb-3">
                         {selectedFile.summary}
                       </p>
-                      <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80 text-xs text-slate-800 whitespace-pre-wrap leading-relaxed">
+                      <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80 text-xs text-slate-800 whitespace-pre-wrap leading-relaxed font-mono">
                         {selectedFile.content}
                       </div>
                     </>
@@ -2241,10 +1598,10 @@ export const App: React.FC = () => {
             <div className="flex items-center justify-between gap-4 mb-4">
               <div>
                 <h2 className="font-display text-lg font-bold text-slate-900">
-                  All Indexed Items & Descriptive Locations ({files.length})
+                  All Indexed Items &amp; Real File Metadata ({files.length})
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Click any item to pull its 3D ball forward, or press Cmd+K anytime to quick-search.
+                  Click any node to highlight it in 3D space, or press Cmd+K to search from anywhere.
                 </p>
               </div>
               <div className="flex items-center gap-2.5">
@@ -2257,7 +1614,7 @@ export const App: React.FC = () => {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Filter folders, Discord, notes..."
+                    placeholder="Filter files, paths, MIME..."
                     className="pl-8 pr-3 py-1.5 text-xs bg-slate-100 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:border-blue-500"
                   />
                 </div>
@@ -2294,19 +1651,15 @@ export const App: React.FC = () => {
                         <div className="text-xs text-slate-500 mt-0.5 flex items-center gap-1.5 truncate">
                           <span>{cat?.name}</span>
                           <span aria-hidden="true">·</span>
-                          <span>{file.locationPath}</span>
+                          <span className="font-mono text-[11px]">
+                            {file.metadata?.relativePath || file.locationPath}
+                          </span>
                         </div>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-2 text-xs text-slate-500 shrink-0">
-                      <span>
-                        {file.workloadPriority === 'caught-up'
-                          ? 'Caught Up ✓'
-                          : file.workloadPriority === 'urgent'
-                          ? 'Urgent Today'
-                          : 'On Deck'}
-                      </span>
+                      <span className="font-mono text-[11px]">{file.sizeLabel}</span>
                       <ArrowUpRight size={14} className="text-slate-400" />
                     </div>
                   </div>
@@ -2324,19 +1677,22 @@ export const App: React.FC = () => {
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="font-display text-lg font-bold text-slate-900">
-                  Customize Group Colors, Connected Folders & 3D Ball Styles
+                  Customize Group Colors, Imported Directories &amp; 3D Ball Styles
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Every ball (including connected folders, Discord, and WhatsApp) is color-coordinated with its group.
+                  Every ball is color-coordinated with its group sphere.
                 </p>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setActiveSheet('connectors')}
+                  onClick={() => {
+                    setActiveSheet('none');
+                    setIsConnectorsOpen(true);
+                  }}
                   className="px-3 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold transition-colors"
                 >
-                  + Connect Storage Folder
+                  + Import Local Directory
                 </button>
                 <button
                   type="button"
@@ -2505,7 +1861,7 @@ export const App: React.FC = () => {
                   Index New App Ball into Location Engine
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Pick an everyday app emblem (like F for Folder, D for Discord, or P for Photos) and its group color.
+                  Pick an app emblem and group color for the new 3D sphere.
                 </p>
               </div>
               <button
@@ -2564,7 +1920,7 @@ export const App: React.FC = () => {
                   required
                   value={newFileTitle}
                   onChange={(e) => setNewFileTitle(e.target.value)}
-                  placeholder="e.g. Tax Receipt, Mom's Recipe, Discord Pin"
+                  placeholder="e.g. Tax Receipt, Mom's Recipe"
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500"
                 />
               </div>
@@ -2638,31 +1994,56 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Unified Collapsible Bottom Control & Location Engine Dock */}
-      <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 w-full max-w-[min(940px,95vw)] pointer-events-none">
-        <div className="flex justify-center mb-1.5">
+      {/*
+        SECTION 1. UI REFACTOR: DOCKABLE DRAWER SYSTEM
+        - Fixed at bottom center: fixed bottom-0 left-1/2 -translate-x-1/2 z-40
+        - Smooth transition: transition-transform duration-300 ease-in-out
+        - Collapsed: translate-y-[calc(100%-38px)] so only the 38px integrated header bar remains visible above viewport edge
+        - Expanded: translate-y-0
+      */}
+      <div
+        className={`fixed bottom-0 left-1/2 -translate-x-1/2 z-40 w-full max-w-[min(940px,95vw)] transition-transform duration-300 ease-in-out ${
+          isDockCollapsed ? 'translate-y-[calc(100%-38px)]' : 'translate-y-0'
+        }`}
+      >
+        <div className="bg-white/95 backdrop-blur-xl border-t border-x border-slate-200/95 rounded-t-2xl shadow-2xl overflow-hidden">
+          {/* Integrated 38px Header Bar attached flush to the top edge of the dock */}
           <button
             type="button"
-            onClick={() => setDockCollapsed(!dockCollapsed)}
-            className="pointer-events-auto flex items-center gap-1.5 px-4 py-1 rounded-full bg-white/90 backdrop-blur-md border border-slate-200/90 hover:border-slate-300 text-xs font-semibold text-slate-700 hover:text-slate-900 shadow-md transition-colors whitespace-nowrap"
+            onClick={() => setIsDockCollapsed((prev) => !prev)}
+            className="w-full h-[38px] px-4 bg-slate-900 hover:bg-slate-800 text-white flex items-center justify-between gap-4 cursor-pointer select-none transition-colors"
+            aria-expanded={!isDockCollapsed}
           >
-            {dockCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            <span>
-              {dockCollapsed
-                ? 'Show Location Engine Bar (or press ⌘K)'
-                : 'Hide Bar'}
-            </span>
-          </button>
-        </div>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="px-2 py-0.5 text-[10px] font-mono font-bold tracking-wider uppercase bg-blue-600 text-white rounded">
+                REACTIVE MIND DOCK
+              </span>
+              <span className="flex items-center gap-1.5 text-xs font-medium text-slate-300 truncate">
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    sseConnected ? 'bg-emerald-400' : 'bg-amber-400'
+                  }`}
+                />
+                <span>
+                  {sseConnected
+                    ? `MCP Ready · ${files.length} Nodes · ${formation}`
+                    : `${files.length} Nodes Indexed`}
+                </span>
+              </span>
+            </div>
 
-        <div
-          className={`pointer-events-auto transition-all duration-200 origin-bottom ${
-            dockCollapsed
-              ? 'opacity-0 translate-y-8 pointer-events-none h-0 overflow-hidden'
-              : 'opacity-100 translate-y-0'
-          }`}
-        >
-          <div className="bg-white/90 backdrop-blur-xl border border-slate-200/90 rounded-2xl shadow-2xl p-4 space-y-3">
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-200 shrink-0">
+              <span className="hidden sm:inline text-[11px] text-slate-400">
+                {isDockCollapsed ? 'Click to Expand Workspace Controls' : 'Click to Collapse Drawer'}
+              </span>
+              <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-800 text-white">
+                {isDockCollapsed ? '▲' : '▼'}
+              </span>
+            </div>
+          </button>
+
+          {/* Dock Drawer Content Body */}
+          <div className="p-4 space-y-3">
             {/* Top Controls Row: Mode Tabs + Structural Formations Bar + PWA Install */}
             <div className="flex flex-wrap items-center justify-between gap-2.5 pb-2.5 border-b border-slate-200/75">
               {/* Segmented Tab Switcher */}
@@ -2687,7 +2068,7 @@ export const App: React.FC = () => {
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  3D Structures & Flow
+                  3D Structures &amp; Flow
                 </button>
                 <button
                   type="button"
@@ -2698,7 +2079,7 @@ export const App: React.FC = () => {
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  Colors & Connectors
+                  Colors &amp; Connectors
                 </button>
               </div>
 
@@ -2773,10 +2154,9 @@ export const App: React.FC = () => {
 
             {dockTab === 'engine' && (
               <div className="space-y-2.5">
-                {/* Location Engine Output Stream */}
                 <div
                   ref={chatScrollRef}
-                  className="max-h-36 overflow-y-auto space-y-2 pr-1"
+                  className="max-h-32 overflow-y-auto space-y-2 pr-1"
                 >
                   {messages.slice(-3).map((msg) => (
                     <div
@@ -2804,7 +2184,7 @@ export const App: React.FC = () => {
                       {msg.retrievedFileIds && msg.retrievedFileIds.length > 0 && (
                         <div className="mt-2 pt-2 border-t border-slate-200/80 flex flex-wrap items-center gap-1.5">
                           <span className="text-[11px] font-semibold text-slate-500 mr-1">
-                            Sorted & Located Balls:
+                            Sorted &amp; Located Nodes:
                           </span>
                           {msg.retrievedFileIds.map((fid) => {
                             const f = files.find((item) => item.id === fid);
@@ -2852,7 +2232,7 @@ export const App: React.FC = () => {
 
                   {isLoadingChat && (
                     <div className="text-xs font-medium text-blue-700 px-3 py-2 bg-blue-50 rounded-xl border border-blue-200/60">
-                      {agentLabel} is sorting through the 3D app balls and resolving locations...
+                      {agentLabel} is sorting through the 3D spheres and resolving locations...
                     </div>
                   )}
 
@@ -2875,7 +2255,7 @@ export const App: React.FC = () => {
                     type="button"
                     onClick={() => setActiveSheet('agent-bridge')}
                     className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700 border border-slate-200 whitespace-nowrap shrink-0"
-                    title="Switch Connected AI Agent (Gemini / Claude / MCP)"
+                    title="Open MCP & Agent Bridge"
                   >
                     <Cpu size={14} className="text-blue-600" />
                     <span>{agentLabel}</span>
@@ -2884,7 +2264,7 @@ export const App: React.FC = () => {
                     type="text"
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
-                    placeholder='Ask your connected agent to locate files, sort your daily workload, or press ⌘K...'
+                    placeholder="Ask your connected agent to locate files, sort your daily workload, or press ⌘K..."
                     className="flex-1 px-4 py-2.5 text-xs bg-slate-100/90 border border-slate-200/90 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 transition-colors"
                   />
                   <button
@@ -2903,7 +2283,7 @@ export const App: React.FC = () => {
               <div className="space-y-3 pt-1">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs font-semibold text-slate-700">
-                    Choose Organizational Structure (Each formation arranges balls with real meaning)
+                    Choose Organizational Structure (Dispatches MCP <code className="font-mono">sort_spheres</code>)
                   </div>
                   <button
                     type="button"
@@ -2911,7 +2291,7 @@ export const App: React.FC = () => {
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors shadow-xs whitespace-nowrap"
                   >
                     <Smile size={14} />
-                    <span>Mark Everything Caught Up & Smile!</span>
+                    <span>Mark Everything Caught Up &amp; Smile!</span>
                   </button>
                 </div>
 
@@ -2949,7 +2329,7 @@ export const App: React.FC = () => {
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
                       <Sliders size={13} className="text-blue-600" />
-                      <span>Group Colors & Connected Spheres</span>
+                      <span>Group Colors &amp; Connected Spheres</span>
                     </span>
                     <button
                       type="button"
@@ -2998,15 +2378,15 @@ export const App: React.FC = () => {
                 <div className="space-y-2">
                   <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5">
                     <HardDrive size={13} className="text-blue-600" />
-                    <span>Storage Connectors & Actions</span>
+                    <span>Data Connectors &amp; Ingestion</span>
                   </span>
                   <div className="flex flex-wrap gap-1.5">
                     <button
                       type="button"
-                      onClick={() => setActiveSheet('connectors')}
+                      onClick={() => setIsConnectorsOpen(true)}
                       className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-blue-600 text-white hover:bg-blue-500 transition-colors whitespace-nowrap"
                     >
-                      Connect Folders / Discord / WhatsApp
+                      Import Directory / Gmail OAuth
                     </button>
                     <button
                       type="button"

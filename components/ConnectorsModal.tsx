@@ -3,39 +3,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  FolderOpen,
-  MessageSquare,
-  Mail,
-  HardDrive,
-  Check,
-  Plus,
   X,
+  HardDrive,
+  FolderOpen,
+  Mail,
+  KeyRound,
+  AlertCircle,
+  CheckCircle2,
   Upload,
+  RefreshCw,
   ExternalLink,
+  MessageSquare,
 } from 'lucide-react';
 import {
   MindCategory,
   MindFileNode,
   MaterialFinish,
-  FileKind,
+  StorageConnectorConfig,
 } from '../types';
+import {
+  ParsedDirectoryEntry,
+  mapDirectoryEntriesToSceneNodes,
+  formatFileSize,
+} from '../data/initialData';
 
-interface ConnectorsModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  categories: MindCategory[];
-  onAddCategoryAndFiles: (
-    newCategory: MindCategory | null,
-    targetCategoryId: string,
-    newFiles: MindFileNode[]
-  ) => void;
-  onUpdateCategory: (
-    catId: string,
-    updates: Partial<Pick<MindCategory, 'color' | 'name' | 'finish' | 'symbol'>>
-  ) => void;
-}
+const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+
+const PRESET_COLORS = [
+  '#06B6D4',
+  '#2563EB',
+  '#10B981',
+  '#F97316',
+  '#8B5CF6',
+  '#EC4899',
+  '#5865F2',
+  '#EAB308',
+];
 
 const FINISH_OPTIONS: { value: MaterialFinish; label: string }[] = [
   { value: 'pearl', label: 'Glossy Pearl' },
@@ -44,743 +49,851 @@ const FINISH_OPTIONS: { value: MaterialFinish; label: string }[] = [
   { value: 'matte', label: 'Soft Matte' },
 ];
 
+interface ConnectorsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  categories: MindCategory[];
+  connectors: StorageConnectorConfig[];
+  onIngestDirectoryAndFiles: (
+    connectorId: string,
+    category: MindCategory,
+    nodes: MindFileNode[],
+    sourceLabel: string
+  ) => void;
+  onUpdateConnectorStyle: (
+    connId: string,
+    updates: Partial<Pick<StorageConnectorConfig, 'color' | 'finish' | 'symbol' | 'name'>>
+  ) => void;
+  onFocusCategory: (categoryId: string) => void;
+}
+
+async function readDirectoryHandleRecursively(
+  dirHandle: any,
+  parentPath: string,
+  rootFolderName: string,
+  collector: ParsedDirectoryEntry[],
+  maxFiles = 40
+): Promise<void> {
+  for await (const entry of dirHandle.values()) {
+    if (collector.length >= maxFiles) return;
+    if (entry.name.startsWith('.')) continue;
+
+    const currentRelativePath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+
+    if (entry.kind === 'directory') {
+      await readDirectoryHandleRecursively(
+        entry,
+        currentRelativePath,
+        rootFolderName,
+        collector,
+        maxFiles
+      );
+    } else if (entry.kind === 'file') {
+      const fileObj: File = await entry.getFile();
+      let textPreview = '';
+      if (
+        fileObj.size > 0 &&
+        fileObj.size < 120000 &&
+        (fileObj.type.startsWith('text/') ||
+          /\.(txt|md|json|csv|eml|log|ts|tsx|js|py|html|css)$/i.test(fileObj.name))
+      ) {
+        try {
+          const text = await fileObj.text();
+          textPreview = text.slice(0, 700);
+        } catch {
+          textPreview = '';
+        }
+      }
+
+      collector.push({
+        name: fileObj.name,
+        relativePath: `${rootFolderName}/${currentRelativePath}`,
+        topFolderName: rootFolderName,
+        mimeType: fileObj.type || 'application/octet-stream',
+        sizeBytes: fileObj.size,
+        lastModified: fileObj.lastModified || Date.now(),
+        textPreview,
+      });
+    }
+  }
+}
+
 export const ConnectorsModal: React.FC<ConnectorsModalProps> = ({
   isOpen,
   onClose,
   categories,
-  onAddCategoryAndFiles,
-  onUpdateCategory,
+  connectors,
+  onIngestDirectoryAndFiles,
+  onUpdateConnectorStyle,
+  onFocusCategory,
 }) => {
-  const [selectedSource, setSelectedSource] = useState<
-    'local-folder' | 'discord' | 'whatsapp' | 'email-vault'
-  >('local-folder');
+  const [activeTab, setActiveTab] = useState<'filesystem' | 'gmail' | 'archives'>('filesystem');
 
-  // Custom group color & settings for the newly connected storage place
-  const [groupName, setGroupName] = useState<string>('My Local Folder');
-  const [groupSymbol, setGroupSymbol] = useState<string>('F');
-  const [groupColor, setGroupColor] = useState<string>('#06B6D4');
-  const [groupFinish, setGroupFinish] = useState<MaterialFinish>('pearl');
-  const [useExistingCategory, setUseExistingCategory] = useState<string>('new');
+  // Local Directory Ingestion State
+  const [isScanningDir, setIsScanningDir] = useState(false);
+  const [dirError, setDirError] = useState<string | null>(null);
+  const [dirSuccess, setDirSuccess] = useState<string | null>(null);
+  const [recentIngestedEntries, setRecentIngestedEntries] = useState<ParsedDirectoryEntry[]>([]);
+  const directoryInputRef = useRef<HTMLInputElement>(null);
 
-  // Discord / WhatsApp / Email input state
-  const [channelOrAccountName, setChannelOrAccountName] = useState<string>('');
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [discordOAuthNote, setDiscordOAuthNote] = useState<string | null>(null);
+  // Archive File Input State (.eml, .txt WhatsApp, .json Discord)
+  const archiveFileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingArchiveConnId, setPendingArchiveConnId] = useState<string>('conn-email-vault');
 
-  const folderInputRef = useRef<HTMLInputElement>(null);
-  const fileArchiveInputRef = useRef<HTMLInputElement>(null);
+  // Gmail OAuth 2.0 & API State
+  const [serverClientId, setServerClientId] = useState<string>('');
+  const [customClientId, setCustomClientId] = useState<string>(() => {
+    return sessionStorage.getItem('reactive_mind_gmail_client_id') || '';
+  });
+  const [accessToken, setAccessToken] = useState<string>('');
+  const [gmailQuery, setGmailQuery] = useState<string>('in:inbox');
+  const [isQueryingGmail, setIsQueryingGmail] = useState<boolean>(false);
+  const [gmailError, setGmailError] = useState<string | null>(null);
+  const [gmailSuccess, setGmailSuccess] = useState<string | null>(null);
 
-  // Update defaults when switching connector tab
+  const localConn =
+    connectors.find((c) => c.provider === 'local-folder') || connectors[0];
+  const gmailConn =
+    connectors.find((c) => c.provider === 'gmail') ||
+    connectors.find((c) => c.provider === 'email-vault') ||
+    connectors[0];
+
   useEffect(() => {
-    setStatusMessage(null);
-    setDiscordOAuthNote(null);
-    if (selectedSource === 'local-folder') {
-      setGroupName('Connected Folder');
-      setGroupSymbol('F');
-      setGroupColor('#06B6D4');
-    } else if (selectedSource === 'discord') {
-      setGroupName('Discord Channels');
-      setGroupSymbol('D');
-      setGroupColor('#5865F2');
-    } else if (selectedSource === 'whatsapp') {
-      setGroupName('WhatsApp Chats');
-      setGroupSymbol('W');
-      setGroupColor('#22C55E');
-    } else if (selectedSource === 'email-vault') {
-      setGroupName('Email Inbox Vault');
-      setGroupSymbol('M');
-      setGroupColor('#EC4899');
-    }
-  }, [selectedSource]);
+    if (!isOpen) return;
+    fetch('/api/gmail/status')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.clientId) {
+          setServerClientId(data.clientId);
+          if (!customClientId) {
+            setCustomClientId(data.clientId);
+          }
+        }
+      })
+      .catch(() => {
+        // ignore
+      });
+  }, [isOpen]);
 
-  // Listen for 3P OAuth popup success message
+  // Listen for OAuth 2.0 popup postMessage returning an access_token for Gmail
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
-        return;
-      }
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && event.data?.provider === 'discord') {
-        handleCompleteDiscordSync('Discord OAuth Account');
+      if (event.data?.type === 'GMAIL_OAUTH_TOKEN' && event.data?.accessToken) {
+        const token = String(event.data.accessToken);
+        setAccessToken(token);
+        setGmailError(null);
+        void fetchGmailMessagesWithToken(token);
       }
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  });
+  }, [gmailQuery, categories, connectors]);
 
   if (!isOpen) return null;
 
-  const createOrResolveTargetCategory = (
-    defaultName: string,
-    symbol: string,
-    color: string,
-    finish: MaterialFinish
-  ): { catObj: MindCategory | null; catId: string } => {
-    if (useExistingCategory !== 'new') {
-      return { catObj: null, catId: useExistingCategory };
+  const handleImportLocalDirectory = async () => {
+    setDirError(null);
+    setDirSuccess(null);
+
+    if ('showDirectoryPicker' in window) {
+      try {
+        setIsScanningDir(true);
+        const dirHandle = await (window as any).showDirectoryPicker({ mode: 'read' });
+        const rootName = dirHandle.name || 'LocalDirectory';
+        const collected: ParsedDirectoryEntry[] = [];
+
+        await readDirectoryHandleRecursively(dirHandle, '', rootName, collected, 40);
+
+        if (collected.length === 0) {
+          setDirError(`Directory "${rootName}" contains no readable files.`);
+          setIsScanningDir(false);
+          return;
+        }
+
+        const { category, nodes } = mapDirectoryEntriesToSceneNodes(
+          rootName,
+          collected,
+          categories,
+          {
+            customColor: localConn.color,
+            customFinish: localConn.finish,
+            customSymbol: localConn.symbol,
+            targetCategoryId: localConn.categoryId,
+          }
+        );
+
+        setRecentIngestedEntries(collected);
+        onIngestDirectoryAndFiles(
+          localConn.id,
+          category,
+          nodes,
+          `${rootName} (${collected.length} files)`
+        );
+        setDirSuccess(
+          `Ingested ${collected.length} real files from "${rootName}" into 3D sphere "${category.name}".`
+        );
+        setIsScanningDir(false);
+        return;
+      } catch (err: any) {
+        setIsScanningDir(false);
+        if (err?.name === 'AbortError') {
+          return;
+        }
+        // Fall through to standard HTML5 <input webkitdirectory> fallback
+      }
     }
-    const id = `${defaultName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Date.now()
-      .toString()
-      .slice(-3)}`;
-    const count = categories.length;
-    const newCat: MindCategory = {
-      id,
-      name: defaultName,
-      symbol: symbol.slice(0, 2).toUpperCase(),
-      color,
-      description: `Connected ${defaultName} storage sphere`,
-      finish,
-      orbitRadius: 5.0,
-      orbitAngle: (count * (Math.PI * 2)) / (count + 1),
-      elevation: count % 2 === 0 ? 0.7 : -0.7,
-      isConnectorGroup: true,
-    };
-    return { catObj: newCat, catId: id };
+
+    if (directoryInputRef.current) {
+      directoryInputRef.current.value = '';
+      directoryInputRef.current.click();
+    }
   };
 
-  // Real Local Folder & Cloud-Synced Directory Picker
-  const handlePickRealFolder = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFallbackDirectoryInput = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
 
-    const filesArray = Array.from(fileList).filter(
-      (f) => !f.name.startsWith('.')
-    );
-    if (filesArray.length === 0) return;
+    setIsScanningDir(true);
+    setDirError(null);
+    setDirSuccess(null);
 
-    // Infer folder name from webkitRelativePath if available
-    const firstRel = (filesArray[0] as any).webkitRelativePath || '';
-    const detectedFolderName = firstRel.includes('/')
-      ? firstRel.split('/')[0]
-      : groupName || 'Connected Folder';
+    try {
+      const filesArray = Array.from(fileList)
+        .filter((f) => !f.name.startsWith('.'))
+        .slice(0, 40);
 
-    const finalGroupName =
-      groupName === 'Connected Folder' && detectedFolderName
-        ? detectedFolderName
-        : groupName;
+      if (filesArray.length === 0) {
+        setDirError('No visible files found in the selected directory.');
+        setIsScanningDir(false);
+        return;
+      }
 
-    const { catObj, catId } = createOrResolveTargetCategory(
-      finalGroupName,
-      groupSymbol || 'F',
-      groupColor,
-      groupFinish
-    );
+      const firstRel = (filesArray[0] as any).webkitRelativePath || filesArray[0].name;
+      const rootName = firstRel.includes('/')
+        ? firstRel.split('/')[0]
+        : 'ImportedDirectory';
 
-    const indexedNodes: MindFileNode[] = [];
-    const maxFiles = Math.min(filesArray.length, 24);
+      const collected: ParsedDirectoryEntry[] = [];
+      for (const fileObj of filesArray) {
+        const relPath =
+          (fileObj as any).webkitRelativePath || `${rootName}/${fileObj.name}`;
+        let textPreview = '';
+        if (
+          fileObj.size > 0 &&
+          fileObj.size < 120000 &&
+          (fileObj.type.startsWith('text/') ||
+            /\.(txt|md|json|csv|eml|log|ts|tsx|js|py|html|css)$/i.test(fileObj.name))
+        ) {
+          try {
+            const raw = await fileObj.text();
+            textPreview = raw.slice(0, 700);
+          } catch {
+            textPreview = '';
+          }
+        }
 
-    for (let i = 0; i < maxFiles; i++) {
-      const f = filesArray[i];
-      const relPath = (f as any).webkitRelativePath || `${finalGroupName}/${f.name}`;
-      const sizeKB = Math.max(1, Math.round(f.size / 1024));
-      let textPreview = `File: ${f.name}\nFolder Location: ${relPath}\nSize: ${sizeKB} KB`;
+        collected.push({
+          name: fileObj.name,
+          relativePath: relPath,
+          topFolderName: rootName,
+          mimeType: fileObj.type || 'application/octet-stream',
+          sizeBytes: fileObj.size,
+          lastModified: fileObj.lastModified || Date.now(),
+          textPreview,
+        });
+      }
 
-      // Read text snippet if it's a readable text/markdown/json/csv/eml file
-      if (
-        f.size < 200 * 1024 &&
-        /\.(txt|md|json|csv|eml|html|log)$/i.test(f.name)
-      ) {
+      const { category, nodes } = mapDirectoryEntriesToSceneNodes(
+        rootName,
+        collected,
+        categories,
+        {
+          customColor: localConn.color,
+          customFinish: localConn.finish,
+          customSymbol: localConn.symbol,
+          targetCategoryId: localConn.categoryId,
+        }
+      );
+
+      setRecentIngestedEntries(collected);
+      onIngestDirectoryAndFiles(
+        localConn.id,
+        category,
+        nodes,
+        `${rootName} (${collected.length} files)`
+      );
+      setDirSuccess(
+        `Ingested ${collected.length} real files from "${rootName}" into 3D sphere "${category.name}".`
+      );
+    } catch (err: any) {
+      setDirError(err?.message || 'Failed to parse selected directory.');
+    } finally {
+      setIsScanningDir(false);
+    }
+  };
+
+  const handleStartGoogleOAuthFlow = () => {
+    setGmailError(null);
+    setGmailSuccess(null);
+
+    const activeClientId = customClientId.trim() || serverClientId.trim();
+    if (!activeClientId) {
+      setGmailError(
+        'OAuth 2.0 Client ID is required to initiate Google authentication. Enter your Google Cloud OAuth Client ID below or provide a valid Bearer Access Token with gmail.readonly scope.'
+      );
+      return;
+    }
+
+    sessionStorage.setItem('reactive_mind_gmail_client_id', activeClientId);
+    const redirectUri = `${window.location.origin}/auth/callback`;
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', activeClientId);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('response_type', 'token');
+    authUrl.searchParams.set('scope', GMAIL_READONLY_SCOPE);
+    authUrl.searchParams.set('include_granted_scopes', 'true');
+    authUrl.searchParams.set('prompt', 'consent');
+    authUrl.searchParams.set('state', 'gmail');
+
+    window.open(authUrl.toString(), 'gmail_oauth_popup', 'width=540,height=660');
+  };
+
+  const fetchGmailMessagesWithToken = async (tokenOverride?: string) => {
+    const tokenToUse = (tokenOverride ?? accessToken).trim();
+    setGmailError(null);
+    setGmailSuccess(null);
+
+    if (!tokenToUse) {
+      setGmailError(
+        `No OAuth 2.0 access token present. Authenticate with Google OAuth (${GMAIL_READONLY_SCOPE}) or paste a valid Bearer token first.`
+      );
+      return;
+    }
+
+    setIsQueryingGmail(true);
+    try {
+      const res = await fetch(
+        `/api/gmail/messages?maxResults=12&q=${encodeURIComponent(gmailQuery.trim() || 'in:inbox')}`,
+        {
+          headers: {
+            Authorization: `Bearer ${tokenToUse}`,
+          },
+        }
+      );
+
+      const data = await res.json();
+      if (!res.ok || !data.authenticated) {
+        throw new Error(
+          data.error ||
+            `Gmail API returned HTTP ${res.status}. Verify your token has ${GMAIL_READONLY_SCOPE} permission.`
+        );
+      }
+
+      const rawMessages: Array<{
+        id: string;
+        threadId: string;
+        subject: string;
+        from: string;
+        date: string;
+        snippet: string;
+        sizeEstimate: number;
+        internalDate: number;
+      }> = data.messages || [];
+
+      if (rawMessages.length === 0) {
+        setGmailError(`Authenticated successfully, but no messages matched query "${gmailQuery}".`);
+        setIsQueryingGmail(false);
+        return;
+      }
+
+      const entries: ParsedDirectoryEntry[] = rawMessages.map((msg) => ({
+        name: msg.subject,
+        relativePath: `Gmail/${gmailQuery || 'Inbox'}/${msg.id}.eml`,
+        topFolderName: 'Gmail Inbox',
+        mimeType: 'message/rfc822',
+        sizeBytes: msg.sizeEstimate || 2048,
+        lastModified: msg.internalDate || Date.now(),
+        textPreview: `From: ${msg.from}\nDate: ${msg.date}\nThread ID: ${msg.threadId}\n\n${msg.snippet}`,
+      }));
+
+      const { category, nodes } = mapDirectoryEntriesToSceneNodes(
+        'Gmail Inbox',
+        entries,
+        categories,
+        {
+          customColor: gmailConn.color,
+          customFinish: gmailConn.finish,
+          customSymbol: 'G',
+          targetCategoryId: gmailConn.categoryId,
+        }
+      );
+
+      onIngestDirectoryAndFiles(
+        gmailConn.id,
+        category,
+        nodes,
+        `Gmail API (${nodes.length} messages)`
+      );
+      setGmailSuccess(
+        `Imported ${nodes.length} live Gmail messages via ${GMAIL_READONLY_SCOPE} into the 3D scene.`
+      );
+    } catch (err: any) {
+      setGmailError(err?.message || 'Failed to query /api/gmail/messages.');
+    } finally {
+      setIsQueryingGmail(false);
+    }
+  };
+
+  const handleArchiveFilesImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const conn =
+      connectors.find((c) => c.id === pendingArchiveConnId) || connectors[0];
+    const uploaded = Array.from(fileList).slice(0, 25);
+    const entries: ParsedDirectoryEntry[] = [];
+
+    for (const fileObj of uploaded) {
+      let textPreview = '';
+      if (fileObj.size < 350000) {
         try {
-          const raw = await f.text();
-          textPreview = raw.slice(0, 900);
+          const raw = await fileObj.text();
+          textPreview = raw.slice(0, 800);
         } catch {
-          // keep default preview
+          textPreview = '';
         }
       }
 
-      const ext = f.name.split('.').pop()?.toLowerCase() || '';
-      const kind: FileKind = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic'].includes(ext)
-        ? 'photo'
-        : ['csv', 'xlsx', 'xls'].includes(ext)
-        ? 'sheet'
-        : ['eml', 'mbox', 'msg'].includes(ext)
-        ? 'email'
-        : 'document';
-
-      indexedNodes.push({
-        id: `folder-node-${Date.now()}-${i}`,
-        title: f.name,
-        categoryId: catId,
-        appSymbol: (groupSymbol || 'F').slice(0, 2).toUpperCase(),
-        appName: finalGroupName,
-        locationPath: `${finalGroupName} · ${relPath}`,
-        storageDrive: 'Connected Local / Cloud Folder',
-        fileKind: kind,
-        sizeLabel: `${sizeKB} KB`,
-        updatedAt: new Date(f.lastModified || Date.now()).toLocaleDateString(),
-        summary: `Indexed from your "${finalGroupName}" folder (${sizeKB} KB).`,
-        content: textPreview,
-        importance: 1.05,
-        workloadPriority: i < 2 ? 'today' : 'caught-up',
+      entries.push({
+        name: fileObj.name,
+        relativePath: `${conn.name}/${fileObj.name}`,
+        topFolderName: conn.name,
+        mimeType: fileObj.type || 'text/plain',
+        sizeBytes: fileObj.size,
+        lastModified: fileObj.lastModified || Date.now(),
+        textPreview,
       });
     }
 
-    onAddCategoryAndFiles(catObj, catId, indexedNodes);
-    setStatusMessage(
-      `Indexed ${indexedNodes.length} files from "${finalGroupName}" into your 3D workspace!`
-    );
-    setTimeout(() => {
-      onClose();
-    }, 900);
-  };
-
-  // Real File / Chat Export Uploader (WhatsApp .txt, Discord .json/.txt, Email .eml/.mbox)
-  const handleImportArchiveFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-
-    const filesArray = Array.from(fileList);
-    const { catObj, catId } = createOrResolveTargetCategory(
-      groupName,
-      groupSymbol,
-      groupColor,
-      groupFinish
-    );
-
-    const indexedNodes: MindFileNode[] = [];
-
-    for (let i = 0; i < Math.min(filesArray.length, 15); i++) {
-      const f = filesArray[i];
-      let rawText = '';
-      try {
-        rawText = (await f.text()).slice(0, 1500);
-      } catch {
-        rawText = `Imported archive file: ${f.name}`;
-      }
-
-      const appLabel =
-        selectedSource === 'discord'
-          ? 'Discord'
-          : selectedSource === 'whatsapp'
-          ? 'WhatsApp'
-          : 'Email Vault';
-
-      indexedNodes.push({
-        id: `archive-${Date.now()}-${i}`,
-        title: f.name.replace(/\.(txt|json|eml|mbox)$/i, ''),
-        categoryId: catId,
-        appSymbol: groupSymbol.slice(0, 2).toUpperCase(),
-        appName: appLabel,
-        locationPath: `${appLabel} · ${channelOrAccountName || 'Imported Archive'} · ${f.name}`,
-        storageDrive: appLabel,
-        fileKind: selectedSource === 'email-vault' ? 'email' : 'chat',
-        sizeLabel: `${Math.max(1, Math.round(f.size / 1024))} KB`,
-        updatedAt: 'Just connected',
-        summary:
-          rawText.split('\n').filter(Boolean).slice(0, 2).join(' — ') ||
-          `Connected ${appLabel} thread`,
-        content: rawText,
-        importance: 1.15,
-        workloadPriority: 'today',
-      });
-    }
-
-    onAddCategoryAndFiles(catObj, catId, indexedNodes);
-    setStatusMessage(
-      `Connected ${indexedNodes.length} ${groupName} items as color-coordinated 3D balls!`
-    );
-    setTimeout(() => {
-      onClose();
-    }, 900);
-  };
-
-  // Discord OAuth Popup Launcher + Channel Connector
-  const handleDiscordOAuthPopup = async () => {
-    try {
-      const redirectUri = `${window.location.origin}/auth/callback`;
-      const res = await fetch(
-        `/api/auth/discord/url?redirectUri=${encodeURIComponent(redirectUri)}`
-      );
-      const data = await res.json();
-      if (!res.ok || !data.configured) {
-        setDiscordOAuthNote(
-          'To use live Discord OAuth login, set DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET in AI Studio Settings, or click "Connect Server Channels Now" below to index your Discord channels immediately.'
-        );
-        return;
-      }
-      window.open(data.url, 'discord_oauth_popup', 'width=600,height=700');
-    } catch {
-      setDiscordOAuthNote(
-        'Could not launch OAuth popup. Use the instant channel connector below.'
-      );
-    }
-  };
-
-  const handleCompleteDiscordSync = (serverLabel?: string) => {
-    const serverName = serverLabel || channelOrAccountName.trim() || 'Creative Team Server';
-    const { catObj, catId } = createOrResolveTargetCategory(
-      groupName || 'Discord',
-      groupSymbol || 'D',
-      groupColor,
-      groupFinish
-    );
-
-    const newBalls: MindFileNode[] = [
+    const { category, nodes } = mapDirectoryEntriesToSceneNodes(
+      conn.name,
+      entries,
+      categories,
       {
-        id: `discord-${Date.now()}-1`,
-        title: `#project-links (${serverName})`,
-        categoryId: catId,
-        appSymbol: groupSymbol || 'D',
-        appName: 'Discord',
-        locationPath: `Discord · ${serverName} → #project-links`,
-        storageDrive: 'Discord Cloud',
-        fileKind: 'chat',
-        sizeLabel: '14 Pinned Links',
-        updatedAt: 'Connected just now',
-        summary: `Pinned Figma boards, shared docs, and voice notes from #project-links in ${serverName}.`,
-        content: `Discord Server: ${serverName}\nChannel: #project-links\n\n• Pinned by Alex: Updated 3D Workspace prototype link\n• Pinned by Sam: Friday release notes & asset pack`,
-        importance: 1.2,
-        workloadPriority: 'today',
-      },
-      {
-        id: `discord-${Date.now()}-2`,
-        title: `#general-notes (${serverName})`,
-        categoryId: catId,
-        appSymbol: groupSymbol || 'D',
-        appName: 'Discord',
-        locationPath: `Discord · ${serverName} → #general-notes`,
-        storageDrive: 'Discord Cloud',
-        fileKind: 'chat',
-        sizeLabel: '8 Saved Threads',
-        updatedAt: 'Connected just now',
-        summary: `Team discussion threads and shared file attachments in ${serverName}.`,
-        content: `Discord Server: ${serverName}\nChannel: #general-notes\n\n• Thread: Next week's schedule & travel plans\n• Shared Attachment: studio-photo-shoot.zip`,
-        importance: 1.05,
-        workloadPriority: 'caught-up',
-      },
-    ];
-
-    onAddCategoryAndFiles(catObj, catId, newBalls);
-    setStatusMessage(`Connected Discord (${serverName}) into its own ${groupColor} 3D group!`);
-    setTimeout(() => {
-      onClose();
-    }, 850);
-  };
-
-  const handleConnectWhatsAppOrEmail = () => {
-    const label =
-      channelOrAccountName.trim() ||
-      (selectedSource === 'whatsapp' ? 'Family & Work Chats' : 'Workspace Email Inbox');
-
-    const { catObj, catId } = createOrResolveTargetCategory(
-      groupName,
-      groupSymbol,
-      groupColor,
-      groupFinish
+        customColor: conn.color,
+        customFinish: conn.finish,
+        customSymbol: conn.symbol,
+        targetCategoryId: conn.categoryId,
+      }
     );
 
-    const newBalls: MindFileNode[] =
-      selectedSource === 'whatsapp'
-        ? [
-            {
-              id: `wa-${Date.now()}-1`,
-              title: `${label} — Shared Media & Links`,
-              categoryId: catId,
-              appSymbol: groupSymbol || 'W',
-              appName: 'WhatsApp',
-              locationPath: `WhatsApp · ${label} → Starred Messages`,
-              storageDrive: 'WhatsApp Backup',
-              fileKind: 'chat',
-              sizeLabel: '9 Starred Items',
-              updatedAt: 'Connected just now',
-              summary: `Starred addresses, voice notes, and shared photos from your "${label}" WhatsApp thread.`,
-              content: `WhatsApp Thread: ${label}\nDescriptive Location: WhatsApp → Starred Messages\n\n• Starred Address: 420 Ocean View Ave (Gate Code #4481)\n• Shared PDF: Contractor Estimate & Kitchen Measurements`,
-              importance: 1.2,
-              workloadPriority: 'urgent',
-            },
-            {
-              id: `wa-${Date.now()}-2`,
-              title: `Weekend Plans Group Chat`,
-              categoryId: catId,
-              appSymbol: groupSymbol || 'W',
-              appName: 'WhatsApp',
-              locationPath: `WhatsApp · Weekend Plans → Pinned Info`,
-              storageDrive: 'WhatsApp Backup',
-              fileKind: 'chat',
-              sizeLabel: 'Pinned Event',
-              updatedAt: 'Connected just now',
-              summary: 'Saturday dinner reservation time and shared photo album link.',
-              content: `WhatsApp Group: Weekend Plans\n• Dinner Saturday at 7:00 PM at Osteria Verde\n• Shared Album link pinned in chat description`,
-              importance: 1.05,
-              workloadPriority: 'today',
-            },
-          ]
-        : [
-            {
-              id: `email-${Date.now()}-1`,
-              title: `${label} — Starred Threads`,
-              categoryId: catId,
-              appSymbol: groupSymbol || 'M',
-              appName: 'Email Vault',
-              locationPath: `${label} · Starred & Important`,
-              storageDrive: label,
-              fileKind: 'email',
-              sizeLabel: '12 Emails',
-              updatedAt: 'Connected just now',
-              summary: `Important threads, invoices, and attachments indexed from ${label}.`,
-              content: `Account: ${label}\nDescriptive Location: ${label} → Starred & Important\n\n• Quarterly Invoice #2049 — Paid\n• Flight & Hotel Itinerary Confirmation`,
-              importance: 1.2,
-              workloadPriority: 'today',
-            },
-          ];
-
-    onAddCategoryAndFiles(catObj, catId, newBalls);
-    setStatusMessage(`Connected ${label} into your color-coordinated 3D workspace!`);
-    setTimeout(() => {
-      onClose();
-    }, 850);
+    onIngestDirectoryAndFiles(
+      conn.id,
+      category,
+      nodes,
+      `${conn.name} (${nodes.length} files)`
+    );
   };
+
+  const redirectUriDisplay = `${window.location.origin}/auth/callback`;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/35 backdrop-blur-sm pointer-events-auto"
+      className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex items-center justify-center p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-3xl bg-white/95 backdrop-blur-2xl border border-slate-200/90 rounded-2xl shadow-2xl p-6 text-slate-900 max-h-[85vh] overflow-y-auto space-y-5"
+        className="w-full max-w-4xl bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4">
+        {/* Hidden Native Directory & File Fallback Inputs */}
+        <input
+          ref={directoryInputRef}
+          type="file"
+          multiple
+          // @ts-expect-error standard HTML5 directory attributes
+          webkitdirectory=""
+          directory=""
+          className="hidden"
+          onChange={handleFallbackDirectoryInput}
+        />
+        <input
+          ref={archiveFileInputRef}
+          type="file"
+          multiple
+          accept=".eml,.mbox,.txt,.json,.csv,.md,.pdf"
+          className="hidden"
+          onChange={handleArchiveFilesImport}
+        />
+
+        {/* Modal Header */}
+        <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-4">
           <div>
-            <h2 className="font-display text-xl font-bold text-slate-900">
-              Connect Your Folders, Chats & Storage Places
+            <h2 className="font-display text-lg font-bold text-slate-900">
+              Data Connectors & Real Filesystem Ingestion
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Link any folder or communication app where you store information, and customize its 3D ball color, emblem letter, and group sphere.
+              Ingest real local directories with native File System Access API or configure OAuth 2.0 credentials for Gmail.
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100"
+            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-200/60 transition-colors"
           >
             <X size={18} />
           </button>
         </div>
 
-        {/* Connector Source Tabs */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-          {[
-            {
-              id: 'local-folder' as const,
-              title: 'Folders & Drives',
-              sub: 'Local, iCloud, Dropbox, Drive folders',
-              icon: FolderOpen,
-              color: '#06B6D4',
-            },
-            {
-              id: 'discord' as const,
-              title: 'Discord',
-              sub: 'Servers, pinned links & threads',
-              icon: MessageSquare,
-              color: '#5865F2',
-            },
-            {
-              id: 'whatsapp' as const,
-              title: 'WhatsApp',
-              sub: 'Starred chats, voice notes & files',
-              icon: MessageSquare,
-              color: '#22C55E',
-            },
-            {
-              id: 'email-vault' as const,
-              title: 'Email Archive',
-              sub: 'Workspace email, .eml & .mbox files',
-              icon: Mail,
-              color: '#EC4899',
-            },
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const active = selectedSource === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setSelectedSource(tab.id)}
-                className={`p-3 rounded-xl border text-left transition-all ${
-                  active
-                    ? 'bg-slate-900 text-white border-slate-900 shadow-md'
-                    : 'bg-slate-50 text-slate-800 border-slate-200 hover:bg-slate-100'
+        {/* Navigation Tabs */}
+        <div className="px-6 pt-3 bg-slate-50/60 border-b border-slate-200 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('filesystem')}
+            className={`px-4 py-2 text-xs font-bold rounded-t-xl border-b-2 transition-colors flex items-center gap-2 ${
+              activeTab === 'filesystem'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <HardDrive size={14} />
+            <span>1. Local Filesystem Ingestion (Web Native)</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('gmail')}
+            className={`px-4 py-2 text-xs font-bold rounded-t-xl border-b-2 transition-colors flex items-center gap-2 ${
+              activeTab === 'gmail'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Mail size={14} />
+            <span>2. Gmail OAuth 2.0 Configuration</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('archives')}
+            className={`px-4 py-2 text-xs font-bold rounded-t-xl border-b-2 transition-colors flex items-center gap-2 ${
+              activeTab === 'archives'
+                ? 'border-blue-600 text-blue-600 bg-white'
+                : 'border-transparent text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <MessageSquare size={14} />
+            <span>3. Chat & Email File Archives (.eml / .txt / .json)</span>
+          </button>
+        </div>
+
+        {/* Modal Body */}
+        <div className="p-6 overflow-y-auto space-y-5 flex-1">
+          {activeTab === 'filesystem' && (
+            <div className="space-y-5">
+              <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200/90 space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="flex items-center gap-3.5">
+                    <div
+                      className="w-12 h-12 rounded-2xl text-white font-display font-extrabold text-xl flex items-center justify-center shadow-sm shrink-0"
+                      style={{ backgroundColor: localConn.color }}
+                    >
+                      {localConn.symbol}
+                    </div>
+                    <div>
+                      <h3 className="font-display font-bold text-base text-slate-900">
+                        Import Local Directory (File System Access API)
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5 max-w-xl">
+                        Uses <code className="font-mono text-slate-700">window.showDirectoryPicker()</code> with automatic fallback to standard HTML5 directory input. Recursively parses real filenames, relative paths, MIME types, byte sizes, and modification timestamps into 3D spheres.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isScanningDir}
+                    onClick={handleImportLocalDirectory}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-bold transition-colors shadow-sm shrink-0"
+                  >
+                    <FolderOpen size={15} />
+                    <span>
+                      {isScanningDir ? 'Scanning Directory...' : 'Import Local Directory'}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Sphere Color & Finish Customizer */}
+                <div className="pt-3 border-t border-slate-200/80 flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-slate-600">
+                      Directory Sphere Color:
+                    </span>
+                    {PRESET_COLORS.map((hex) => (
+                      <button
+                        key={hex}
+                        type="button"
+                        onClick={() => onUpdateConnectorStyle(localConn.id, { color: hex })}
+                        className={`w-5 h-5 rounded-full transition-transform ${
+                          localConn.color.toLowerCase() === hex.toLowerCase()
+                            ? 'scale-125 ring-2 ring-slate-900 ring-offset-1'
+                            : 'opacity-80 hover:opacity-100'
+                        }`}
+                        style={{ backgroundColor: hex }}
+                      />
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-slate-600">
+                      3D Material Finish:
+                    </span>
+                    <select
+                      value={localConn.finish}
+                      onChange={(e) =>
+                        onUpdateConnectorStyle(localConn.id, {
+                          finish: e.target.value as MaterialFinish,
+                        })
+                      }
+                      className="px-2.5 py-1 text-xs bg-white border border-slate-200 rounded-lg text-slate-800 font-semibold"
+                    >
+                      {FINISH_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {dirError && (
+                <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-center gap-2.5">
+                  <AlertCircle size={16} className="text-rose-600 shrink-0" />
+                  <span>{dirError}</span>
+                </div>
+              )}
+
+              {dirSuccess && (
+                <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                    <span className="font-semibold">{dirSuccess}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onFocusCategory(localConn.categoryId);
+                      onClose();
+                    }}
+                    className="px-3 py-1 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-500 shrink-0"
+                  >
+                    Focus 3D Sphere →
+                  </button>
+                </div>
+              )}
+
+              {/* Live Ingested File Metadata Table */}
+              {recentIngestedEntries.length > 0 && (
+                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="px-4 py-2.5 bg-slate-100 border-b border-slate-200 flex items-center justify-between text-xs font-bold text-slate-700">
+                    <span>Parsed Real File Metadata ({recentIngestedEntries.length} nodes)</span>
+                    <span className="font-mono text-[11px] text-slate-500">
+                      Mapped to initialData.ts 3D Schema
+                    </span>
+                  </div>
+                  <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 text-xs">
+                    {recentIngestedEntries.map((entry, idx) => (
+                      <div
+                        key={`${entry.relativePath}-${idx}`}
+                        className="px-4 py-2.5 flex items-center justify-between gap-4 bg-white hover:bg-slate-50"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-900 truncate">
+                            {entry.name}
+                          </div>
+                          <div className="font-mono text-[11px] text-slate-500 truncate">
+                            {entry.relativePath}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3 text-[11px] text-slate-500 shrink-0 tabular-nums">
+                          <span className="px-2 py-0.5 rounded bg-slate-100 font-mono text-slate-700">
+                            {entry.mimeType}
+                          </span>
+                          <span>{formatFileSize(entry.sizeBytes)}</span>
+                          <span>
+                            {new Date(entry.lastModified).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'gmail' && (
+            <div className="space-y-4">
+              {/* Configuration Status Banner */}
+              <div
+                className={`p-4 rounded-xl border flex items-start gap-3 ${
+                  serverClientId || customClientId || accessToken
+                    ? 'bg-blue-50/70 border-blue-200 text-slate-800'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
                 }`}
               >
-                <div className="flex items-center gap-2 mb-1">
-                  <span
-                    className="w-6 h-6 rounded-lg flex items-center justify-center text-white shrink-0"
-                    style={{ backgroundColor: tab.color }}
-                  >
-                    <Icon size={13} />
-                  </span>
-                  <span className="font-display font-bold text-xs">{tab.title}</span>
-                </div>
-                <div
-                  className={`text-[10px] leading-snug ${
-                    active ? 'text-slate-300' : 'text-slate-500'
-                  }`}
-                >
-                  {tab.sub}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Customize 3D Group Color, Emblem & Finish for this Connector */}
-        <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/90 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-800">
-              1. Customize 3D Ball Color, Emblem & Group Sphere
-            </span>
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-slate-500">Target Group:</span>
-              <select
-                value={useExistingCategory}
-                onChange={(e) => setUseExistingCategory(e.target.value)}
-                className="px-2.5 py-1 text-xs bg-white border border-slate-200 rounded-lg font-semibold text-slate-800"
-              >
-                <option value="new">+ Create New 3D Group Sphere</option>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    Add into existing &ldquo;{c.name}&rdquo; sphere
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-            <div className="sm:col-span-2">
-              <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-                Group Sphere Name
-              </label>
-              <input
-                type="text"
-                value={groupName}
-                onChange={(e) => setGroupName(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-xl text-slate-900 font-semibold focus:outline-none focus:border-blue-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-                Ball Letter (1–2 chars)
-              </label>
-              <input
-                type="text"
-                maxLength={2}
-                value={groupSymbol}
-                onChange={(e) => setGroupSymbol(e.target.value.toUpperCase())}
-                className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-xl text-slate-900 font-display font-bold text-center focus:outline-none focus:border-blue-500"
-              />
-            </div>
-
-            <div className="flex items-center gap-2">
-              <div className="flex-1">
-                <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-                  Finish
-                </label>
-                <select
-                  value={groupFinish}
-                  onChange={(e) => setGroupFinish(e.target.value as MaterialFinish)}
-                  className="w-full px-2.5 py-2 text-xs bg-white border border-slate-200 rounded-xl text-slate-800 font-medium"
-                >
-                  {FINISH_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-                  Color
-                </label>
-                <input
-                  type="color"
-                  value={groupColor}
-                  onChange={(e) => setGroupColor(e.target.value)}
-                  className="w-9 h-9 rounded-xl bg-white border border-slate-200 cursor-pointer p-0.5"
+                <KeyRound
+                  size={18}
+                  className={
+                    serverClientId || customClientId || accessToken
+                      ? 'text-blue-600 shrink-0 mt-0.5'
+                      : 'text-amber-600 shrink-0 mt-0.5'
+                  }
                 />
+                <div className="text-xs space-y-1">
+                  <div className="font-bold">
+                    {serverClientId
+                      ? 'Server GOOGLE_CLIENT_ID Detected'
+                      : 'Gmail OAuth 2.0 Configuration Required'}
+                  </div>
+                  <p className="text-slate-600 leading-relaxed">
+                    Server endpoint <code className="font-mono font-semibold">/api/gmail/messages</code> queries real messages using the{' '}
+                    <code className="font-mono font-semibold text-blue-700">
+                      {GMAIL_READONLY_SCOPE}
+                    </code>{' '}
+                    scope. Provide your Google OAuth 2.0 Client ID (with Authorized Redirect URI{' '}
+                    <code className="font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200">
+                      {redirectUriDisplay}
+                    </code>
+                    ) or paste an OAuth 2.0 Bearer Access Token to ingest real messages.
+                  </p>
+                </div>
               </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Option A: Google OAuth 2.0 Client ID (Popup Flow)
+                  </label>
+                  <input
+                    type="text"
+                    value={customClientId}
+                    onChange={(e) => setCustomClientId(e.target.value)}
+                    placeholder="e.g. 1234567890-abc.apps.googleusercontent.com"
+                    className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleStartGoogleOAuthFlow}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors"
+                  >
+                    <ExternalLink size={14} />
+                    <span>Authorize with Google OAuth 2.0</span>
+                  </button>
+                </div>
+
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Option B: Direct OAuth 2.0 Bearer Access Token
+                  </label>
+                  <input
+                    type="password"
+                    value={accessToken}
+                    onChange={(e) => setAccessToken(e.target.value)}
+                    placeholder="Paste ya29... token with gmail.readonly scope"
+                    className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500"
+                  />
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={gmailQuery}
+                      onChange={(e) => setGmailQuery(e.target.value)}
+                      placeholder="Gmail query (e.g. in:inbox, is:starred)"
+                      className="flex-1 px-3 py-2 text-xs bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      disabled={isQueryingGmail}
+                      onClick={() => fetchGmailMessagesWithToken()}
+                      className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors shrink-0"
+                    >
+                      <RefreshCw size={13} className={isQueryingGmail ? 'animate-spin' : ''} />
+                      <span>{isQueryingGmail ? 'Querying...' : 'Query Gmail API'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {gmailError && (
+                <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2.5">
+                  <AlertCircle size={16} className="text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold">Gmail Authentication / Query Error</div>
+                    <div className="mt-0.5">{gmailError}</div>
+                  </div>
+                </div>
+              )}
+
+              {gmailSuccess && (
+                <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
+                    <span className="font-semibold">{gmailSuccess}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="px-3 py-1 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-500"
+                  >
+                    View in 3D Scene →
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
+          )}
+
+          {activeTab === 'archives' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {connectors
+                .filter((c) => c.provider !== 'local-folder')
+                .map((conn) => (
+                  <div
+                    key={conn.id}
+                    className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-10 h-10 rounded-xl text-white font-display font-extrabold text-base flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: conn.color }}
+                      >
+                        {conn.symbol}
+                      </div>
+                      <div>
+                        <h4 className="font-display font-bold text-sm text-slate-900">
+                          {conn.name}
+                        </h4>
+                        <p className="text-[11px] text-slate-500">{conn.accountOrPathLabel}</p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPendingArchiveConnId(conn.id);
+                        if (archiveFileInputRef.current) {
+                          archiveFileInputRef.current.value = '';
+                          archiveFileInputRef.current.click();
+                        }
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-200 text-xs font-semibold transition-colors"
+                    >
+                      <Upload size={13} />
+                      <span>Select Real Files (.eml / .txt / .json)</span>
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
         </div>
-
-        {/* Step 2: Specific Connector Action */}
-        {selectedSource === 'local-folder' && (
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h3 className="font-display font-bold text-sm text-slate-900">
-                  2. Select Any Folder on Your Device or Cloud Drive
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Choose any folder (Desktop, Documents, synced Google Drive folder, iCloud Drive, or Dropbox folder). Each file inside becomes a color-coordinated 3D ball with its real folder location.
-                </p>
-              </div>
-              <HardDrive size={20} className="text-cyan-600 shrink-0" />
-            </div>
-
-            <input
-              ref={folderInputRef}
-              type="file"
-              // @ts-expect-error webkitdirectory is standard across modern browsers for folder selection
-              webkitdirectory="true"
-              directory="true"
-              multiple
-              onChange={handlePickRealFolder}
-              className="hidden"
-            />
-
-            <div className="flex flex-wrap items-center gap-3 pt-1">
-              <button
-                type="button"
-                onClick={() => folderInputRef.current?.click()}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm transition-colors"
-              >
-                <FolderOpen size={15} />
-                <span>Choose Folder from Computer / Cloud Drive</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {selectedSource === 'discord' && (
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-            <h3 className="font-display font-bold text-sm text-slate-900">
-              2. Connect Discord Server, Channels, or Chat Export
-            </h3>
-            <p className="text-xs text-slate-500">
-              Index pinned links, shared attachments, and discussion threads into color-coded <strong>{groupSymbol}</strong> balls.
-            </p>
-
-            <div className="flex flex-wrap items-center gap-2.5">
-              <input
-                type="text"
-                value={channelOrAccountName}
-                onChange={(e) => setChannelOrAccountName(e.target.value)}
-                placeholder="Discord Server or Channel Name (e.g. Design Studio Server)"
-                className="flex-1 min-w-[220px] px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500"
-              />
-              <button
-                type="button"
-                onClick={() => handleCompleteDiscordSync()}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#5865F2] hover:bg-[#4752C4] text-white text-xs font-semibold transition-colors"
-              >
-                <Plus size={14} />
-                <span>Connect Server Channels Now</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleDiscordOAuthPopup}
-                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition-colors"
-              >
-                <ExternalLink size={13} />
-                <span>Discord OAuth Popup</span>
-              </button>
-            </div>
-
-            {discordOAuthNote && (
-              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">
-                {discordOAuthNote}
-              </div>
-            )}
-
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
-              <span className="text-xs text-slate-500">
-                Or upload a Discord chat export (<code>.json</code> / <code>.txt</code>):
-              </span>
-              <input
-                ref={fileArchiveInputRef}
-                type="file"
-                accept=".json,.txt,.md,.csv"
-                multiple
-                onChange={handleImportArchiveFiles}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => fileArchiveInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700"
-              >
-                <Upload size={13} />
-                <span>Import Export File</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {(selectedSource === 'whatsapp' || selectedSource === 'email-vault') && (
-          <div className="p-4 rounded-2xl bg-white border border-slate-200 space-y-3">
-            <h3 className="font-display font-bold text-sm text-slate-900">
-              {selectedSource === 'whatsapp'
-                ? '2. Connect WhatsApp Chats & Starred Media'
-                : '2. Connect Workspace Email Folder or .EML / .MBOX Archive'}
-            </h3>
-            <p className="text-xs text-slate-500">
-              {selectedSource === 'whatsapp'
-                ? 'Bring your starred WhatsApp messages, addresses, voice notes, or exported .txt chat history into 3D space.'
-                : 'Index important emails, receipts, and attachments into color-coded 3D balls.'}
-            </p>
-
-            <div className="flex flex-wrap items-center gap-2.5">
-              <input
-                type="text"
-                value={channelOrAccountName}
-                onChange={(e) => setChannelOrAccountName(e.target.value)}
-                placeholder={
-                  selectedSource === 'whatsapp'
-                    ? 'Chat or Group Name (e.g. Family Chat, Contractor Thread)'
-                    : 'Email Account or Folder Label (e.g. Work Inbox, Client Threads)'
-                }
-                className="flex-1 min-w-[220px] px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500"
-              />
-              <button
-                type="button"
-                onClick={handleConnectWhatsAppOrEmail}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-white text-xs font-semibold transition-colors shadow-xs"
-                style={{ backgroundColor: groupColor }}
-              >
-                <Plus size={14} />
-                <span>
-                  {selectedSource === 'whatsapp'
-                    ? 'Connect WhatsApp Thread'
-                    : 'Connect Email Folder'}
-                </span>
-              </button>
-            </div>
-
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
-              <span className="text-xs text-slate-500">
-                {selectedSource === 'whatsapp'
-                  ? 'Have a WhatsApp exported chat (.txt)? Upload it directly:'
-                  : 'Have saved email files (.eml, .mbox, .txt, .csv)? Upload them directly:'}
-              </span>
-              <input
-                ref={fileArchiveInputRef}
-                type="file"
-                accept=".txt,.eml,.mbox,.json,.csv,.md"
-                multiple
-                onChange={handleImportArchiveFiles}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => fileArchiveInputRef.current?.click()}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700"
-              >
-                <Upload size={13} />
-                <span>Upload Files</span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {statusMessage && (
-          <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800">
-            <Check size={15} className="text-emerald-600 shrink-0" />
-            <span>{statusMessage}</span>
-          </div>
-        )}
       </div>
     </div>
   );

@@ -23,6 +23,13 @@ const _camGoalTarget = new THREE.Vector3();
 // Cache procedural CanvasTextures by (symbol + color)
 const textureCache = new Map<string, THREE.CanvasTexture>();
 
+export function disposeCachedBallTextures() {
+  textureCache.forEach((tex) => {
+    tex.dispose();
+  });
+  textureCache.clear();
+}
+
 function getAppBallTexture(
   symbol: string,
   hexColor: string,
@@ -78,7 +85,7 @@ function getAppBallTexture(
   return texture;
 }
 
-interface SpatialMindMapProps {
+export interface SpatialMindMapProps {
   categories: MindCategory[];
   files: MindFileNode[];
   formation: FormationMode;
@@ -91,6 +98,7 @@ interface SpatialMindMapProps {
   activeToolName: string | null;
   searchQuery: string;
   cameraPreset: 'overview' | 'top' | 'focus';
+  coordinateOverridesRef?: React.MutableRefObject<Record<string, [number, number, number]>>;
   onSelectCategory: (categoryId: string) => void;
   onSelectFile: (fileId: string) => void;
   onToggleExplodeAll: () => void;
@@ -100,22 +108,35 @@ const BrightStudioEnvironmentSetup: React.FC = () => {
   const { gl, scene } = useThree();
 
   useEffect(() => {
-    const isHeadless =
-      navigator.webdriver || /HeadlessChrome/i.test(navigator.userAgent);
     gl.outputColorSpace = THREE.SRGBColorSpace;
     gl.toneMapping = THREE.ACESFilmicToneMapping;
     gl.toneMappingExposure = 1.08;
-    gl.setPixelRatio(isHeadless ? 1 : Math.min(window.devicePixelRatio, 2));
+    gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
     const pmremGenerator = new THREE.PMREMGenerator(gl);
     pmremGenerator.compileEquirectangularShader();
-    const envTexture = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-    scene.environment = envTexture;
+    const roomEnv = new RoomEnvironment();
+    const envTarget = pmremGenerator.fromScene(roomEnv, 0.04);
+    scene.environment = envTarget.texture;
     scene.fog = new THREE.FogExp2('#F4F7FB', 0.015);
 
     return () => {
-      envTexture.dispose();
+      envTarget.dispose();
+      roomEnv.dispose();
       pmremGenerator.dispose();
+      scene.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.geometry) {
+          mesh.geometry.dispose();
+        }
+        if (mesh.material) {
+          if (Array.isArray(mesh.material)) {
+            mesh.material.forEach((m) => m.dispose());
+          } else {
+            mesh.material.dispose();
+          }
+        }
+      });
     };
   }, [gl, scene]);
 
@@ -176,12 +197,7 @@ function getMaterialProps(finish: MaterialFinish, isOuterBubble = false) {
   }
 }
 
-/**
- * Computes exact purposeful 3D coordinates for every ball depending on:
- * - Active Formation ('clusters' | 'daily-flow' | 'app-grid' | 'kaleidoscope' | 'caught-up-smile')
- * - Whether the ball was just retrieved by an Agent tool call (pulled forward to inspection stage!)
- */
-function computeTargetBallPosition(
+export function computeTargetBallPosition(
   file: MindFileNode,
   globalIndex: number,
   totalFiles: number,
@@ -191,10 +207,18 @@ function computeTargetBallPosition(
   effectiveExplosion: number,
   formation: FormationMode,
   retrievedFileIds: string[],
-  allFiles: MindFileNode[]
+  allFiles: MindFileNode[],
+  overrideCoord?: [number, number, number]
 ): [number, number, number] {
-  // If this ball was retrieved by an Agent tool call, bring it to the front presentation arc
-  // unless we are explicitly viewing one of the full-scene structural formations
+  // 1. Direct MCP coordinate mutation override (via useRef without React state loop)
+  if (overrideCoord) {
+    return overrideCoord;
+  }
+  if (file.coordinateOverride) {
+    return file.coordinateOverride;
+  }
+
+  // 2. Retrieved / Highlighted ball pulled forward to inspection arc
   const retrievedIdx = retrievedFileIds.indexOf(file.id);
   if (
     retrievedIdx !== -1 &&
@@ -211,10 +235,6 @@ function computeTargetBallPosition(
   }
 
   if (formation === 'daily-flow') {
-    // 3 purposeful workload tiers:
-    // 1. Urgent Today -> Front Stage (z = +2.8, y = +0.9)
-    // 2. On Deck Today -> Middle Arc (z = 0.0, y = 0.0)
-    // 3. Caught Up -> Peaceful Back Arc (z = -3.0, y = -0.5)
     const urgentList = allFiles.filter((f) => f.workloadPriority === 'urgent');
     const todayList = allFiles.filter((f) => f.workloadPriority === 'today');
     const caughtUpList = allFiles.filter((f) => f.workloadPriority === 'caught-up');
@@ -250,7 +270,6 @@ function computeTargetBallPosition(
   }
 
   if (formation === 'app-grid') {
-    // Group balls into crisp vertical columns by App Symbol (G, D, P, N, C, etc.)
     const uniqueSymbols = Array.from(new Set(allFiles.map((f) => f.appSymbol)));
     const colIndex = uniqueSymbols.indexOf(file.appSymbol);
     const sameAppFiles = allFiles.filter((f) => f.appSymbol === file.appSymbol);
@@ -265,8 +284,6 @@ function computeTargetBallPosition(
   }
 
   if (formation === 'kaleidoscope') {
-    // Symmetrical geometric flower mandala organized by category & index
-    // Inner 6-ball star ring + Outer 11-ball petal ring
     if (globalIndex < 6) {
       const angle = (globalIndex / 6) * Math.PI * 2;
       const r = 2.35;
@@ -285,8 +302,6 @@ function computeTargetBallPosition(
   }
 
   if (formation === 'caught-up-smile') {
-    // Peaceful "All Caught Up!" 3D Smile & Eyes Formation
-    // First 2 balls form the Left Eye, next 2 balls form the Right Eye, remaining balls form a wide cheerful Smile Arc!
     if (globalIndex === 0) return [-2.1, 2.0, 0.5];
     if (globalIndex === 1) return [-2.1, 2.85, 0.5];
     if (globalIndex === 2) return [2.1, 2.0, 0.5];
@@ -294,7 +309,6 @@ function computeTargetBallPosition(
 
     const smileIdx = globalIndex - 4;
     const smileTotal = Math.max(totalFiles - 4, 1);
-    // Angle from -0.82*PI to -0.18*PI (bottom smiling U-curve)
     const t = smileTotal === 1 ? 0.5 : smileIdx / (smileTotal - 1);
     const angle = THREE.MathUtils.lerp(-Math.PI * 0.84, -Math.PI * 0.16, t);
     const radiusX = 5.2;
@@ -306,7 +320,6 @@ function computeTargetBallPosition(
     ];
   }
 
-  // Default: 'clusters' mode (nested in group sphere when clustered, fanned out around group when broken apart)
   const localDir = computeFileLocalOffset(indexInCat, totalInCat);
   const explodedDist = 1.75 + (indexInCat % 3) * 0.42;
   const clusteredDist = 0.34 + (indexInCat % 3) * 0.08;
@@ -335,6 +348,7 @@ interface FileBubbleNodeProps {
   isDimmed: boolean;
   onSelectFile: (fileId: string) => void;
   worldPositionsRef: React.MutableRefObject<Record<string, THREE.Vector3>>;
+  coordinateOverridesRef?: React.MutableRefObject<Record<string, [number, number, number]>>;
 }
 
 const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
@@ -354,6 +368,7 @@ const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
   isDimmed,
   onSelectFile,
   worldPositionsRef,
+  coordinateOverridesRef,
 }) => {
   const { gl } = useThree();
   const groupRef = useRef<THREE.Group>(null);
@@ -373,10 +388,32 @@ const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
   const matProps = useMemo(() => getMaterialProps(category.finish, false), [category.finish]);
   const baseBallSize = 0.36 * (file.importance || 1.0);
 
+  useEffect(() => {
+    return () => {
+      if (meshRef.current) {
+        meshRef.current.geometry?.dispose();
+        if (Array.isArray(meshRef.current.material)) {
+          meshRef.current.material.forEach((m) => m.dispose());
+        } else {
+          meshRef.current.material?.dispose();
+        }
+      }
+      if (haloRef.current) {
+        haloRef.current.geometry?.dispose();
+        if (Array.isArray(haloRef.current.material)) {
+          haloRef.current.material.forEach((m) => m.dispose());
+        } else {
+          haloRef.current.material?.dispose();
+        }
+      }
+    };
+  }, []);
+
   useFrame((state, delta) => {
     if (!groupRef.current || !meshRef.current) return;
 
     const t = state.clock.getElapsedTime();
+    const overrideCoord = coordinateOverridesRef?.current?.[file.id];
 
     const [tx, ty, tz] = computeTargetBallPosition(
       file,
@@ -388,11 +425,10 @@ const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
       effectiveExplosion,
       formation,
       isRetrieved ? [file.id] : [],
-      allFiles
+      allFiles,
+      overrideCoord
     );
 
-    // When an AI Agent tool is actively sorting through the balls (isSorting = true),
-    // create a sequential inspection riffle wave across the balls!
     let sortBounceY = 0;
     let sortPullZ = 0;
     let sortScaleBoost = 0;
@@ -404,7 +440,6 @@ const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
       sortScaleBoost = wavePulse * 0.32;
     }
 
-    // Gentle peaceful breathing when settled
     const calmFloatY = Math.sin(t * 1.1 + globalIndex * 0.9) * 0.05;
     const calmFloatX =
       formation === 'kaleidoscope'
@@ -436,7 +471,6 @@ const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
 
     groupRef.current.position.copy(currentPosRef.current);
 
-    // Face camera so the bold app letter ("G", "D", "P", "N") is always upright and legible
     meshRef.current.lookAt(state.camera.position);
     meshRef.current.rotateY(-Math.PI / 2);
 
@@ -506,7 +540,7 @@ const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
           document.body.style.cursor = 'default';
         }}
       >
-        <sphereGeometry args={[baseBallSize, 40, 40]} />
+        <sphereGeometry args={[baseBallSize, 36, 36]} />
         <meshPhysicalMaterial
           map={ballTexture}
           color="#FFFFFF"
@@ -575,7 +609,6 @@ const FileBubbleNode: React.FC<FileBubbleNodeProps> = ({
   );
 };
 
-// Category Group Shell (only visible in 'clusters' formation)
 const CategoryClusterShell: React.FC<{
   category: MindCategory;
   categoryFileCount: number;
@@ -621,6 +654,27 @@ const CategoryClusterShell: React.FC<{
 
   const shellScaleRef = useRef(1);
   const groupScaleRef = useRef(1);
+
+  useEffect(() => {
+    return () => {
+      if (coreRef.current) {
+        coreRef.current.geometry?.dispose();
+        if (Array.isArray(coreRef.current.material)) {
+          coreRef.current.material.forEach((m) => m.dispose());
+        } else {
+          coreRef.current.material?.dispose();
+        }
+      }
+      if (shellRef.current) {
+        shellRef.current.geometry?.dispose();
+        if (Array.isArray(shellRef.current.material)) {
+          shellRef.current.material.forEach((m) => m.dispose());
+        } else {
+          shellRef.current.material?.dispose();
+        }
+      }
+    };
+  }, []);
 
   useFrame((state, delta) => {
     const targetGroupScale = visible ? 1.0 : 0.001;
@@ -674,7 +728,7 @@ const CategoryClusterShell: React.FC<{
           document.body.style.cursor = 'default';
         }}
       >
-        <sphereGeometry args={[0.46, 40, 40]} />
+        <sphereGeometry args={[0.46, 36, 36]} />
         <meshPhysicalMaterial
           map={hubEmblemTexture}
           color="#FFFFFF"
@@ -703,7 +757,7 @@ const CategoryClusterShell: React.FC<{
           document.body.style.cursor = 'default';
         }}
       >
-        <sphereGeometry args={[1.08, 48, 48]} />
+        <sphereGeometry args={[1.08, 44, 44]} />
         <meshPhysicalMaterial
           color={category.color}
           emissive={category.color}
@@ -748,7 +802,6 @@ const CategoryClusterShell: React.FC<{
   );
 };
 
-// Stage Banner Labels for Daily Workload Flow, App Grid, Kaleidoscope, and Caught-Up Smile
 const FormationStageLabels: React.FC<{
   formation: FormationMode;
   isSorting: boolean;
@@ -811,7 +864,7 @@ const FormationStageLabels: React.FC<{
     return (
       <Html position={[0, 3.6, 0]} center distanceFactor={13}>
         <div className="px-4 py-1.5 rounded-full bg-slate-900 text-white text-xs font-bold shadow-lg whitespace-nowrap">
-          App Shelf Columns · Sorted by App Emblem (G, D, P, N, C)
+          App Shelf Columns · Sorted by App Emblem
         </div>
       </Html>
     );
@@ -902,7 +955,6 @@ const CameraChoreographer: React.FC<{
         formation === 'kaleidoscope' ||
         formation === 'app-grid'
       ) {
-        // Face frontally so the Smile, Kaleidoscope, and App Columns look crystal clear
         _camGoalPos.set(0, 1.2, desiredDistanceRef.current);
       } else {
         _tempVecA.copy(camera.position).sub(controlsRef.current.target);
@@ -938,6 +990,7 @@ export const SpatialMindMap: React.FC<SpatialMindMapProps> = ({
   activeToolName,
   searchQuery,
   cameraPreset,
+  coordinateOverridesRef,
   onSelectCategory,
   onSelectFile,
 }) => {
@@ -945,10 +998,17 @@ export const SpatialMindMap: React.FC<SpatialMindMapProps> = ({
   const worldPositionsRef = useRef<Record<string, THREE.Vector3>>({});
   const [webglLost, setWebglLost] = useState(false);
 
+  // Dispose cached procedural textures on component unmount
+  useEffect(() => {
+    return () => {
+      disposeCachedBallTextures();
+    };
+  }, []);
+
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
   return (
-    <div className="relative w-full h-full bg-gradient-to-b from-[#F8FAFC] via-[#EFF4FB] to-[#E2E8F0] select-none">
+    <div className="relative w-full h-full bg-gradient-to-b from-[#F8FAFC] via-[#EFF4FB] to-[#E2E8F0] select-none pointer-events-auto">
       {webglLost ? (
         <div className="w-full h-full flex flex-col items-center justify-center p-8 text-center">
           <p className="text-lg font-display font-bold text-slate-900 mb-2">
@@ -967,8 +1027,10 @@ export const SpatialMindMap: React.FC<SpatialMindMapProps> = ({
         </div>
       ) : (
         <Canvas
+          dpr={[1, 2]}
           camera={{ position: [0, 3.2, 12.2], fov: 44, near: 0.1, far: 120 }}
           onCreated={({ gl }) => {
+            gl.setPixelRatio(Math.min(window.devicePixelRatio, 2));
             const canvas = gl.domElement;
             canvas.addEventListener('webglcontextlost', (e) => {
               e.preventDefault();
@@ -992,7 +1054,7 @@ export const SpatialMindMap: React.FC<SpatialMindMapProps> = ({
             activeToolName={activeToolName}
           />
 
-          {/* Category Group Containment Bubbles (Shown in 'clusters' mode) */}
+          {/* Category Group Containment Bubbles */}
           {categories.map((category) => {
             const catFiles = files.filter((f) => f.categoryId === category.id);
             const isExpanded = expandedCategoryIds.includes(category.id);
@@ -1016,7 +1078,7 @@ export const SpatialMindMap: React.FC<SpatialMindMapProps> = ({
             );
           })}
 
-          {/* All Everyday App Balls (Morphing smoothly between Clusters, Daily Workload, App Grid, Kaleidoscope, and Caught-Up Smile) */}
+          {/* All Everyday & Imported File Balls */}
           {files.map((file, globalIdx) => {
             const category =
               categories.find((c) => c.id === file.categoryId) || categories[0];
@@ -1069,6 +1131,7 @@ export const SpatialMindMap: React.FC<SpatialMindMapProps> = ({
                 isDimmed={isDimmed}
                 onSelectFile={onSelectFile}
                 worldPositionsRef={worldPositionsRef}
+                coordinateOverridesRef={coordinateOverridesRef}
               />
             );
           })}
