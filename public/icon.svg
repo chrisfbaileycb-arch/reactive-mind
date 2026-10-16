@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F8FAFC" />
+      <stop offset="100%" stop-color="#E2E8F0" />
+    </linearGradient>
+    <radialGradient id="blueBall" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#60A5FA" />
+      <stop offset="100%" stop-color="#2563EB" />
+    </radialGradient>
+    <radialGradient id="coralBall" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#FB923C" />
+      <stop offset="100%" stop-color="#EA580C" />
+    </radialGradient>
+    <radialGradient id="mintBall" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#059669" />
+    </radialGradient>
+    <radialGradient id="purpleBall" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#C084FC" />
+      <stop offset="100%" stop-color="#7C3AED" />
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  <circle cx="256" cy="256" r="108" fill="url(#blueBall)" />
+  <circle cx="132" cy="144" r="52" fill="url(#coralBall)" />
+  <circle cx="384" cy="148" r="46" fill="url(#mintBall)" />
+  <circle cx="378" cy="368" r="54" fill="url(#purpleBall)" />
+  <circle cx="138" cy="366" r="44" fill="url(#blueBall)" />
+  <text x="256" y="288" font-family="sans-serif" font-weight="800" font-size="96" fill="#FFFFFF" text-anchor="middle">M</text>
+</svg>
